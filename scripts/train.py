@@ -2,6 +2,7 @@
 """Train Harmonica models."""
 
 import argparse
+import sys
 from pathlib import Path
 from functools import partial
 import yaml
@@ -9,22 +10,42 @@ import yaml
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
-from harmonica.model import ARTransformer, NARTransformer
-from harmonica.codec import EnCodecBackend
-from harmonica.text import CharTokenizer
-from harmonica.data import (
-    LJSpeechDataset,
-    VCTKDataset,
-    LibriTTSDataset,
-    CachedDataset,
-    HFVCTKStreamingDataset,
-    HFVCTKDataset,
-)
-from harmonica.data.sampler import CurriculumSampler
-from harmonica.data.collate import Collator, HarmonicaBatch
-from harmonica.training import Trainer, NARTrainer
-from harmonica.utils.device import get_device
-from harmonica.utils.seed import set_seed
+try:
+    from harmonica.model import ARTransformer, NARTransformer
+    from harmonica.codec import EnCodecBackend
+    from harmonica.text import CharTokenizer
+    from harmonica.data import (
+        LJSpeechDataset,
+        VCTKDataset,
+        LibriTTSDataset,
+        CachedDataset,
+        HFVCTKStreamingDataset,
+        HFVCTKDataset,
+    )
+    from harmonica.data.sampler import CurriculumSampler
+    from harmonica.data.collate import Collator, HarmonicaBatch
+    from harmonica.training import Trainer, NARTrainer
+    from harmonica.utils.device import get_device
+    from harmonica.utils.seed import set_seed
+except ModuleNotFoundError:
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    from harmonica.model import ARTransformer, NARTransformer
+    from harmonica.codec import EnCodecBackend
+    from harmonica.text import CharTokenizer
+    from harmonica.data import (
+        LJSpeechDataset,
+        VCTKDataset,
+        LibriTTSDataset,
+        CachedDataset,
+        HFVCTKStreamingDataset,
+        HFVCTKDataset,
+    )
+    from harmonica.data.sampler import CurriculumSampler
+    from harmonica.data.collate import Collator, HarmonicaBatch
+    from harmonica.training import Trainer, NARTrainer
+    from harmonica.utils.device import get_device
+    from harmonica.utils.seed import set_seed
 
 
 def load_config(config_path: str) -> dict:

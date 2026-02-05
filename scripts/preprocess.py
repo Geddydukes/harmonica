@@ -2,6 +2,7 @@
 """Preprocess datasets: encode audio to codec tokens and cache."""
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Optional
 import json
@@ -9,8 +10,14 @@ import json
 import torch
 from tqdm import tqdm
 
-from harmonica.codec import EnCodecBackend
-from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
+try:
+    from harmonica.codec import EnCodecBackend
+    from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
+except ModuleNotFoundError:
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    from harmonica.codec import EnCodecBackend
+    from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
 from harmonica.utils.audio import AudioPreprocessor, load_audio_file
 from harmonica.utils.device import get_device
 
