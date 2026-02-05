@@ -71,6 +71,7 @@ class Collator:
         prompt_frames: int = 0,
         sample_rate: int = 24000,
         preprocessor: Optional[AudioPreprocessor] = None,
+        max_audio_len: Optional[int] = None,
     ):
         """Initialize collator.
 
@@ -89,6 +90,7 @@ class Collator:
         self.preprocessor = preprocessor or AudioPreprocessor(
             target_sample_rate=sample_rate
         )
+        self.max_audio_len = max_audio_len
 
     def __call__(self, samples: List[Dict[str, Any]]) -> HarmonicaBatch:
         """Collate samples into a batch.
@@ -126,6 +128,9 @@ class Collator:
                     )
                 else:
                     tokens = self.codec.encode(waveform.unsqueeze(0)).squeeze(0)
+
+            if self.max_audio_len is not None and tokens.shape[-1] > self.max_audio_len:
+                tokens = tokens[..., : self.max_audio_len]
 
             codec_tokens_list.append(tokens)
             audio_lengths.append(tokens.shape[-1])

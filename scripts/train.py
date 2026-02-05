@@ -212,6 +212,7 @@ def create_dataloader(config: dict, tokenizer: CharTokenizer, codec: EnCodecBack
         codec=codec,
         speaker_to_idx=speaker_to_idx,
         sample_rate=config.get("codec", {}).get("sample_rate", 24000),
+        max_audio_len=config.get("model", {}).get("ar", {}).get("max_seq_len"),
     )
 
     # Create dataloader
