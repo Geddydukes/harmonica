@@ -10,14 +10,12 @@ import json
 import torch
 from tqdm import tqdm
 
-try:
-    from harmonica.codec import EnCodecBackend
-    from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
-except ModuleNotFoundError:
-    repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
-    from harmonica.codec import EnCodecBackend
-    from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
+
+from harmonica.codec import EnCodecBackend
+from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
 from harmonica.utils.audio import AudioPreprocessor, load_audio_file
 from harmonica.utils.device import get_device
 

@@ -10,42 +10,26 @@ import yaml
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
-try:
-    from harmonica.model import ARTransformer, NARTransformer
-    from harmonica.codec import EnCodecBackend
-    from harmonica.text import CharTokenizer
-    from harmonica.data import (
-        LJSpeechDataset,
-        VCTKDataset,
-        LibriTTSDataset,
-        CachedDataset,
-        HFVCTKStreamingDataset,
-        HFVCTKDataset,
-    )
-    from harmonica.data.sampler import CurriculumSampler
-    from harmonica.data.collate import Collator, HarmonicaBatch
-    from harmonica.training import Trainer, NARTrainer
-    from harmonica.utils.device import get_device
-    from harmonica.utils.seed import set_seed
-except ModuleNotFoundError:
-    repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
-    from harmonica.model import ARTransformer, NARTransformer
-    from harmonica.codec import EnCodecBackend
-    from harmonica.text import CharTokenizer
-    from harmonica.data import (
-        LJSpeechDataset,
-        VCTKDataset,
-        LibriTTSDataset,
-        CachedDataset,
-        HFVCTKStreamingDataset,
-        HFVCTKDataset,
-    )
-    from harmonica.data.sampler import CurriculumSampler
-    from harmonica.data.collate import Collator, HarmonicaBatch
-    from harmonica.training import Trainer, NARTrainer
-    from harmonica.utils.device import get_device
-    from harmonica.utils.seed import set_seed
+
+from harmonica.model import ARTransformer, NARTransformer
+from harmonica.codec import EnCodecBackend
+from harmonica.text import CharTokenizer
+from harmonica.data import (
+    LJSpeechDataset,
+    VCTKDataset,
+    LibriTTSDataset,
+    CachedDataset,
+    HFVCTKStreamingDataset,
+    HFVCTKDataset,
+)
+from harmonica.data.sampler import CurriculumSampler
+from harmonica.data.collate import Collator, HarmonicaBatch
+from harmonica.training import Trainer, NARTrainer
+from harmonica.utils.device import get_device
+from harmonica.utils.seed import set_seed
 
 
 def load_config(config_path: str) -> dict:
