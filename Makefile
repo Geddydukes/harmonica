@@ -49,6 +49,11 @@ train-nar:
 train-resume:
 	python scripts/train.py --config configs/experiment/baseline.yaml --model-type ar --resume
 
+train-ljspeech:
+	python scripts/download_data.py --dataset ljspeech --output-dir ./data
+	PYTHONPATH=. .venv/bin/python scripts/preprocess.py --dataset ljspeech --data-dir ./data/LJSpeech-1.1 --output-dir ./cache/ljspeech
+	PYTHONPATH=. .venv/bin/python scripts/train.py --config configs/experiment/baseline.yaml --model-type ar
+
 train-vctk-base:
 	bash scripts/train_vctk.sh ./data/VCTK-Corpus ./cache/vctk auto
 
