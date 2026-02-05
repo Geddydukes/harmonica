@@ -1,9 +1,9 @@
-# LJSpeech MPS-friendly config
+# Colab-friendly VCTK config (fits T4 16GB)
 
 experiment:
-  name: "ljspeech_mps"
-  log_dir: "./experiments/logs/ljspeech_mps"
-  checkpoint_dir: "./experiments/checkpoints/ljspeech_mps"
+  name: "vctk_colab"
+  log_dir: "./experiments/logs/vctk_colab"
+  checkpoint_dir: "./experiments/checkpoints/vctk_colab"
   seed: 42
 
 model:
@@ -19,21 +19,19 @@ model:
     max_text_len: 256
 
 data:
-  dataset: "ljspeech"
-  data_dir: "./data/LJSpeech-1.1"
-  cache_dir: "./cache/ljspeech"
+  dataset: "vctk"
+  data_dir: "./data/VCTK-Corpus-0.92"
+  cache_dir: "./cache/vctk"
   max_audio_len: 6.0
   min_audio_len: 0.5
-  num_workers: 0
+  num_workers: 2
 
 training:
   batch_size: 1
-  grad_accum_steps: 32
-  max_steps: 50000
+  grad_accum_steps: 16
+  max_steps: 100000
   lr: 1.0e-4
-  warmup_steps: 100
-  scheduler_type: "cosine_warmup"
-  min_lr_ratio: 0.1
+  warmup_steps: 1000
   weight_decay: 0.01
   max_grad_norm: 1.0
   mixed_precision: true
@@ -41,7 +39,7 @@ training:
   eval_every: 1000
   log_every: 100
   scheduled_sampling: false
-  label_smoothing: 0.2
+  label_smoothing: 0.1
 
 codec:
   type: "encodec"
@@ -49,4 +47,4 @@ codec:
   sample_rate: 24000
 
 device:
-  prefer: "mps"
+  prefer: "cuda"

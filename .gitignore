@@ -19,6 +19,7 @@ experiments/logs/
 experiments/checkpoints/
 cache/
 data/
+!harmonica/data/
 eval/output/
 notebooks/.ipynb_checkpoints/
 hf_cache_backup/

@@ -96,6 +96,7 @@ class Trainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
         self._last_pred_tokens = None
+        self._last_audio_lengths = None
 
         # Optional failure detection for eval pipelines
         self.failure_detector = FailureModeDetector() if FailureModeDetector else None
@@ -203,6 +204,8 @@ class Trainer:
                             vocab_size=self.model.vocab_size if hasattr(self.model, "vocab_size") else 1024,
                             step=log_step,
                             prefix="train",
+                            pad_token_id=getattr(self.model, "pad_token_id", None),
+                            audio_lengths=self._last_audio_lengths,
                         )
                     attn = None
                     if hasattr(self.model, "layers") and self.model.layers:
@@ -380,6 +383,7 @@ class Trainer:
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
             self._last_pred_tokens = preds.detach()
+            self._last_audio_lengths = audio_lengths.detach() if audio_lengths is not None else None
             accuracy = (preds == audio_tokens).float().mean()
             perplexity = torch.exp(loss.detach())
 

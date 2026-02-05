@@ -47,11 +47,19 @@ def preprocess_dataset(
             "n_codebooks": codec.n_codebooks,
             "codebook_size": codec.codebook_size,
         },
+        "preprocess": {
+            "min_duration": dataset.min_duration,
+            "max_duration": dataset.max_duration,
+        },
     }
 
     print(f"Preprocessing {len(dataset)} samples...")
 
-    preprocessor = AudioPreprocessor(target_sample_rate=codec.sample_rate)
+    preprocessor = AudioPreprocessor(
+        target_sample_rate=codec.sample_rate,
+        min_duration=dataset.min_duration,
+        max_duration=dataset.max_duration,
+    )
 
     cache_idx = 0
 

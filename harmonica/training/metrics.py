@@ -173,18 +173,34 @@ class MetricsTracker:
         vocab_size: int,
         step: int,
         prefix: str = "train",
+        pad_token_id: int | None = None,
+        audio_lengths: torch.Tensor | None = None,
     ) -> None:
         """Log codebook utilization and token histogram."""
         if self.writer is None:
             return
 
-        unique_tokens = torch.unique(predicted_tokens).numel()
+        tokens = predicted_tokens
+        if audio_lengths is not None:
+            # Mask out padding positions based on true lengths
+            lengths = audio_lengths.to(tokens.device)
+            max_len = tokens.shape[1]
+            mask = torch.arange(max_len, device=tokens.device).unsqueeze(0) < lengths.unsqueeze(1)
+            tokens = tokens[mask]
+            if tokens.numel() == 0:
+                return
+        if pad_token_id is not None:
+            tokens = tokens[tokens != pad_token_id]
+            if tokens.numel() == 0:
+                return
+
+        unique_tokens = torch.unique(tokens).numel()
         utilization = unique_tokens / max(vocab_size, 1)
 
         self.writer.add_scalar(f"{prefix}/codebook_utilization", utilization, step)
 
         token_counts = torch.bincount(
-            predicted_tokens.flatten().cpu(), minlength=vocab_size
+            tokens.flatten().cpu(), minlength=vocab_size
         )
         self.writer.add_histogram(
             f"{prefix}/token_distribution", token_counts, step
