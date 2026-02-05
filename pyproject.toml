@@ -1,0 +1,63 @@
+[project]
+name = "harmonica"
+version = "0.1.0"
+description = "Micro Neural Voice Cloning System - VALL-E style codec-LM TTS"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Harmonica Team"}
+]
+keywords = ["tts", "voice-cloning", "neural-codec", "transformer", "vall-e"]
+
+dependencies = [
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "encodec>=0.1.1",
+    "descript-audio-codec>=1.0.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "tqdm>=4.65",
+    "pyyaml>=6.0",
+    "tensorboard>=2.13",
+    "soundfile>=0.12",
+    "datasets>=2.18",
+    "torchcodec>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.0.270",
+]
+hf = [
+    "datasets>=2.14",
+]
+
+[project.scripts]
+harmonica-train = "scripts.train:main"
+harmonica-synth = "scripts.synthesize:main"
+harmonica-preprocess = "scripts.preprocess:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["harmonica*", "scripts"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

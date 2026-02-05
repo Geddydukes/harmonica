@@ -1,0 +1,9 @@
+# NAR Transformer - Small (~30M params)
+nar:
+  n_codebooks: 7              # Codebooks 2-8
+  vocab_size: 1024
+  d_model: 512
+  n_heads: 8
+  n_layers: 8
+  d_ff: 2048
+  dropout: 0.1

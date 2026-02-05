@@ -1,0 +1,11 @@
+torch>=2.0
+torchaudio>=2.0
+encodec>=0.1.1
+descript-audio-codec>=1.0.0
+numpy>=1.24
+scipy>=1.10
+tqdm>=4.65
+pyyaml>=6.0
+tensorboard>=2.13
+soundfile>=0.12
+datasets>=2.14

@@ -1,0 +1,54 @@
+# Baseline experiment configuration
+# Single speaker AR training on LJSpeech
+
+experiment:
+  name: "baseline_ljspeech"
+  log_dir: "./experiments/logs/baseline"
+  checkpoint_dir: "./experiments/checkpoints/baseline"
+  seed: 42
+
+# Use small AR model
+model:
+  ar:
+    vocab_size: 1024
+    text_vocab_size: 128
+    d_model: 512
+    n_heads: 8
+    n_layers: 12
+    d_ff: 2048
+    dropout: 0.1
+    max_seq_len: 2048
+    max_text_len: 512
+
+# LJSpeech only
+data:
+  dataset: "ljspeech"
+  data_dir: "./data/LJSpeech-1.1"
+  cache_dir: "./cache/ljspeech"
+  max_audio_len: 10.0
+  min_audio_len: 0.5
+  num_workers: 4
+
+# Training for single speaker
+training:
+  batch_size: 8
+  grad_accum_steps: 4
+  max_steps: 50000
+  lr: 1.0e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  mixed_precision: true
+  checkpoint_every: 5000
+  eval_every: 1000
+  log_every: 100
+
+# Codec
+codec:
+  type: "encodec"
+  bandwidth: 6.0
+  sample_rate: 24000
+
+# Device
+device:
+  prefer: "auto"

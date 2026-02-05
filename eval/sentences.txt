@@ -1,0 +1,48 @@
+# Harmonica Evaluation Sentences
+# Fixed set for consistent evaluation
+
+# Short sentences (< 10 words)
+Hello, world.
+How are you today?
+The quick brown fox.
+This is a test.
+Nice to meet you.
+Good morning, everyone.
+Thank you very much.
+See you later.
+What time is it?
+I love music.
+Please help me.
+The weather is nice.
+Can you hear me?
+That sounds great.
+Let's get started.
+Welcome to the show.
+Have a nice day.
+I agree with you.
+Time flies quickly.
+The sun is shining.
+Keep up the work.
+Everything will be fine.
+I understand completely.
+That's very interesting.
+Please speak clearly.
+
+# Medium sentences (10-25 words)
+The quick brown fox jumps over the lazy dog near the riverbank on a sunny afternoon.
+Artificial intelligence is transforming how we interact with technology in our daily lives.
+She sells seashells by the seashore on sunny summer afternoons while tourists watch.
+Please remember to bring your umbrella if it looks like rain outside today.
+The library was quiet except for the soft rustling of pages being turned.
+Scientists discovered a new species of butterfly in the Amazon rainforest last month.
+Learning a new language takes time, patience, and consistent practice every single day.
+The concert was absolutely amazing, with thousands of fans singing along to every song.
+Technology has changed the way we communicate, work, and entertain ourselves over the years.
+The chef prepared a delicious meal using fresh ingredients from the local farmers market.
+
+# Long sentences (> 25 words)
+In the heart of the ancient forest, where sunlight barely penetrated the thick canopy of leaves, a small stream wound its way through moss-covered rocks and fallen trees.
+The scientist carefully documented her findings, knowing that this discovery could fundamentally change our understanding of the natural world and open new avenues for research.
+As the sun set over the horizon, painting the sky in brilliant shades of orange and pink, the children gathered on the beach to watch the day come to a peaceful end.
+The old bookstore on the corner of Main Street had been there for over a hundred years, its shelves filled with rare first editions and forgotten manuscripts from centuries past.
+When the train finally arrived at the station, the passengers hurried to find their seats, eager to begin their long journey across the country to visit family for the holidays.

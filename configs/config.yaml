@@ -1,0 +1,87 @@
+# Harmonica Base Configuration
+# Override specific values in experiment configs
+
+# Model configuration
+model:
+  # AR Transformer
+  ar:
+    vocab_size: 1024          # Codebook vocabulary size
+    text_vocab_size: 128      # Character vocabulary size
+    d_model: 512
+    n_heads: 8
+    n_layers: 12
+    d_ff: 2048
+    dropout: 0.1
+    max_seq_len: 2048
+    max_text_len: 512
+    # Length control strategy
+    length_control_mode: "duration_predictor"  # duration_predictor, stop_token, length_prompt
+    duration_hidden_dim: 256
+
+  # NAR Transformer
+  nar:
+    n_codebooks: 7            # Codebooks 2-8
+    vocab_size: 1024
+    d_model: 512
+    n_heads: 8
+    n_layers: 8
+    d_ff: 2048
+    dropout: 0.1
+
+  # Speaker Encoder
+  speaker:
+    d_model: 512
+    pooling: "mean"           # mean, attention
+
+# Audio codec configuration
+codec:
+  type: "encodec"             # encodec or dac
+  bandwidth: 6.0              # kbps for encodec
+  sample_rate: 24000
+
+# Data configuration
+data:
+  dataset: "ljspeech"         # ljspeech, vctk, libritts, mixed
+  data_dir: "./data"
+  cache_dir: "./cache"
+  max_audio_len: 10.0         # seconds
+  min_audio_len: 0.5          # seconds
+  num_workers: 4
+
+# Training configuration
+training:
+  batch_size: 8
+  grad_accum_steps: 4
+  max_steps: 100000
+  lr: 1.0e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  mixed_precision: true
+  checkpoint_every: 5000
+  eval_every: 1000
+  log_every: 100
+  # Scheduled sampling (prevents exposure bias)
+  scheduled_sampling: true
+  teacher_forcing_schedule: "linear"  # linear, exponential, constant
+  teacher_forcing_start: 1.0
+  teacher_forcing_end: 0.3
+  duration_loss_weight: 0.1
+
+# Inference configuration
+inference:
+  temperature: 0.8
+  top_k: 50
+  top_p: 0.95
+  max_length: 2048
+
+# Experiment tracking
+experiment:
+  name: "harmonica"
+  log_dir: "./experiments/logs"
+  checkpoint_dir: "./experiments/checkpoints"
+  seed: 42
+
+# Device configuration
+device:
+  prefer: "auto"              # auto, cuda, mps, cpu

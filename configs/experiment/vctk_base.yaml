@@ -1,0 +1,57 @@
+# VCTK base training configuration
+
+experiment:
+  name: "vctk_base"
+  log_dir: "./experiments/logs/vctk_base"
+  checkpoint_dir: "./experiments/checkpoints/vctk_base"
+  seed: 42
+
+model:
+  ar:
+    vocab_size: 1024
+    text_vocab_size: 128
+    d_model: 512
+    n_heads: 8
+    n_layers: 12
+    d_ff: 2048
+    dropout: 0.1
+    max_seq_len: 2048
+    max_text_len: 512
+
+  nar:
+    n_codebooks: 7
+    vocab_size: 1024
+    d_model: 512
+    n_heads: 8
+    n_layers: 8
+    d_ff: 2048
+    dropout: 0.1
+
+data:
+  dataset: "vctk"
+  data_dir: "./data/VCTK-Corpus"
+  cache_dir: "./cache/vctk"
+  max_audio_len: 10.0
+  min_audio_len: 0.5
+  num_workers: 4
+
+training:
+  batch_size: 2
+  grad_accum_steps: 16
+  max_steps: 100000
+  lr: 1.0e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  mixed_precision: true
+  checkpoint_every: 5000
+  eval_every: 1000
+  log_every: 100
+
+codec:
+  type: "encodec"
+  bandwidth: 6.0
+  sample_rate: 24000
+
+device:
+  prefer: "auto"
