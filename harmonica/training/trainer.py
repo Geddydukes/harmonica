@@ -69,6 +69,8 @@ class Trainer:
         self.warn_after_step = train_cfg.get("warn_after_step", 2000)
         self.codebook_entropy_weight = train_cfg.get("codebook_entropy_weight", 0.0)
         self.codebook_entropy_warmup_steps = train_cfg.get("codebook_entropy_warmup_steps", 0)
+        self.token_noise_prob = train_cfg.get("token_noise_prob", 0.0)
+        self.token_noise_warmup_steps = train_cfg.get("token_noise_warmup_steps", 0)
 
         # Create optimizer and scheduler
         self.optimizer = create_optimizer(
@@ -365,8 +367,9 @@ class Trainer:
             if audio_lengths is not None:
                 audio_lengths = audio_lengths + 1
 
+        noisy_tokens = self._maybe_apply_token_noise(audio_tokens, audio_lengths)
         logits = self.model.forward(
-            audio_tokens=audio_tokens,
+            audio_tokens=noisy_tokens,
             text_tokens=text_tokens,
             text_lengths=text_lengths,
             prompt_tokens=prompt_tokens,
@@ -424,6 +427,48 @@ class Trainer:
         if duration_loss is not None:
             metrics["duration_loss"] = duration_loss.item()
         return loss, metrics
+
+    def _maybe_apply_token_noise(
+        self,
+        audio_tokens: torch.Tensor,
+        audio_lengths: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Apply input token noise during teacher forcing to reduce collapse."""
+        prob = self._token_noise_prob_for_step(self.global_step)
+        if prob <= 0:
+            return audio_tokens
+
+        B, L = audio_tokens.shape
+        device = audio_tokens.device
+
+        if audio_lengths is not None:
+            valid = torch.arange(L, device=device).expand(B, L) < audio_lengths.unsqueeze(1)
+        else:
+            valid = torch.ones((B, L), device=device, dtype=torch.bool)
+
+        noise_mask = (torch.rand(B, L, device=device) < prob) & valid
+        if not noise_mask.any():
+            return audio_tokens
+
+        random_tokens = torch.randint(
+            low=0,
+            high=self.model.vocab_size,
+            size=(B, L),
+            device=device,
+            dtype=audio_tokens.dtype,
+        )
+        return torch.where(noise_mask, random_tokens, audio_tokens)
+
+    def _token_noise_prob_for_step(self, step: int) -> float:
+        """Ramp token noise down after warmup."""
+        if self.token_noise_prob <= 0:
+            return 0.0
+        if self.token_noise_warmup_steps <= 0:
+            return float(self.token_noise_prob)
+        if step >= self.token_noise_warmup_steps:
+            return 0.0
+        remaining = 1.0 - (step / float(self.token_noise_warmup_steps))
+        return float(self.token_noise_prob * max(0.0, remaining))
 
     def _ar_scheduled_sampling_step(
         self,

@@ -41,8 +41,11 @@ training:
   scheduled_sampling: false
   label_smoothing: 0.05
   # Encourage broader codebook usage early to prevent collapse.
-  codebook_entropy_weight: 0.06
+  codebook_entropy_weight: 0.12
   codebook_entropy_warmup_steps: 20000
+  # Input token noise to avoid early mode collapse.
+  token_noise_prob: 0.10
+  token_noise_warmup_steps: 20000
   scheduler_type: "cosine_warmup"
   min_lr_ratio: 0.2
 
