@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 import time
+import math
 import numpy as np
 
 import torch
@@ -54,23 +55,54 @@ class Trainer:
 
         # Training config
         train_cfg = config.get("training", {})
-        self.max_steps = train_cfg.get("max_steps", 100000)
         self.grad_accum_steps = train_cfg.get("grad_accum_steps", 1)
         self.max_grad_norm = train_cfg.get("max_grad_norm", 1.0)
-        self.checkpoint_every = train_cfg.get("checkpoint_every", 5000)
-        self.eval_every = train_cfg.get("eval_every", 1000)
-        self.log_every = train_cfg.get("log_every", 100)
         self.label_smoothing = train_cfg.get("label_smoothing", 0.0)
         self.use_scheduled_sampling = train_cfg.get("scheduled_sampling", False)
         self.teacher_forcing_schedule = train_cfg.get("teacher_forcing_schedule", "linear")
         self.teacher_forcing_start = train_cfg.get("teacher_forcing_start", 1.0)
         self.teacher_forcing_end = train_cfg.get("teacher_forcing_end", 0.3)
         self.duration_loss_weight = train_cfg.get("duration_loss_weight", 0.0)
-        self.warn_after_step = train_cfg.get("warn_after_step", 2000)
         self.codebook_entropy_weight = train_cfg.get("codebook_entropy_weight", 0.0)
-        self.codebook_entropy_warmup_steps = train_cfg.get("codebook_entropy_warmup_steps", 0)
         self.token_noise_prob = train_cfg.get("token_noise_prob", 0.0)
-        self.token_noise_warmup_steps = train_cfg.get("token_noise_warmup_steps", 0)
+
+        # Step semantics: schedules and intervals are tracked in optimizer-update units.
+        self.max_update_steps = self._resolve_update_steps(
+            train_cfg, "max_update_steps", "max_steps", default_legacy=100000, allow_zero=False
+        )
+        self.warmup_update_steps = self._resolve_update_steps(
+            train_cfg, "warmup_update_steps", "warmup_steps", default_legacy=1000, allow_zero=True
+        )
+        self.log_every_updates = self._resolve_update_steps(
+            train_cfg, "log_every_updates", "log_every", default_legacy=100, allow_zero=False
+        )
+        self.eval_every_updates = self._resolve_update_steps(
+            train_cfg, "eval_every_updates", "eval_every", default_legacy=1000, allow_zero=False
+        )
+        self.checkpoint_every_updates = self._resolve_update_steps(
+            train_cfg,
+            "checkpoint_every_updates",
+            "checkpoint_every",
+            default_legacy=5000,
+            allow_zero=False,
+        )
+        self.warn_after_updates = self._resolve_update_steps(
+            train_cfg, "warn_after_updates", "warn_after_step", default_legacy=2000, allow_zero=True
+        )
+        self.codebook_entropy_warmup_updates = self._resolve_update_steps(
+            train_cfg,
+            "codebook_entropy_warmup_updates",
+            "codebook_entropy_warmup_steps",
+            default_legacy=0,
+            allow_zero=True,
+        )
+        self.token_noise_warmup_updates = self._resolve_update_steps(
+            train_cfg,
+            "token_noise_warmup_updates",
+            "token_noise_warmup_steps",
+            default_legacy=0,
+            allow_zero=True,
+        )
 
         # Create optimizer and scheduler
         self.optimizer = create_optimizer(
@@ -80,17 +112,11 @@ class Trainer:
         )
         self.scheduler = create_scheduler(
             self.optimizer,
-            warmup_steps=train_cfg.get("warmup_steps", 1000),
-            max_steps=self.max_steps,
+            warmup_steps=self.warmup_update_steps,
+            max_steps=self.max_update_steps,
             scheduler_type=train_cfg.get("scheduler_type", "cosine_warmup"),
             min_lr_ratio=train_cfg.get("min_lr_ratio", 0.1),
         )
-        warmup_steps = train_cfg.get("warmup_steps", 1000)
-        if warmup_steps < self.grad_accum_steps:
-            print(
-                f"Warning: warmup_steps ({warmup_steps}) < grad_accum_steps "
-                f"({self.grad_accum_steps}). Warmup will be very short."
-            )
 
         # Mixed precision
         use_mixed = train_cfg.get("mixed_precision", True) and supports_mixed_precision(self.device)
@@ -106,13 +132,41 @@ class Trainer:
         self.metrics = MetricsTracker(str(self.log_dir), use_tensorboard=True)
 
         # Training state
-        self.global_step = 0
+        self.micro_step = 0
+        self.optimizer_step = 0
+        self.global_step = 0  # legacy alias for micro_step
         self.best_val_loss = float("inf")
         self._last_pred_tokens = None
         self._last_audio_lengths = None
 
         # Optional failure detection for eval pipelines
         self.failure_detector = FailureModeDetector() if FailureModeDetector else None
+
+    def _resolve_update_steps(
+        self,
+        train_cfg: Dict[str, Any],
+        update_key: str,
+        legacy_key: str,
+        default_legacy: int,
+        allow_zero: bool = False,
+    ) -> int:
+        """Resolve update-based values with backward-compatible micro-step conversion."""
+        if update_key in train_cfg and train_cfg.get(update_key) is not None:
+            value = int(train_cfg.get(update_key))
+        else:
+            legacy_value = int(train_cfg.get(legacy_key, default_legacy))
+            if allow_zero and legacy_value <= 0:
+                value = 0
+            else:
+                value = int(math.ceil(legacy_value / max(1, self.grad_accum_steps)))
+            print(
+                f"Info: converted `{legacy_key}={legacy_value}` micro-steps to "
+                f"`{update_key}={value}` updates (grad_accum_steps={self.grad_accum_steps})."
+            )
+
+        if allow_zero:
+            return max(0, value)
+        return max(1, value)
 
     def train(self, resume: bool = True) -> Dict[str, Any]:
         """Run training loop.
@@ -137,24 +191,42 @@ class Trainer:
                     device=self.device,
                     sampler=self.train_loader.sampler if self.train_loader is not None else None,
                 )
-                self.global_step = ckpt_info["step"]
-                print(f"Resumed at step {self.global_step}")
+                self.micro_step = int(ckpt_info.get("micro_step", ckpt_info.get("step", 0)))
+                self.optimizer_step = int(
+                    ckpt_info.get("optimizer_step", max(getattr(self.scheduler, "last_epoch", 0), 0))
+                )
+                aligned_micro = self.optimizer_step * self.grad_accum_steps
+                if self.micro_step != aligned_micro:
+                    print(
+                        f"Warning: checkpoint micro_step ({self.micro_step}) does not match "
+                        f"optimizer_step*grad_accum ({aligned_micro}). Aligning to {aligned_micro}."
+                    )
+                    self.micro_step = aligned_micro
+                self.global_step = self.micro_step
+                print(
+                    f"Resumed at micro_step={self.micro_step}, optimizer_step={self.optimizer_step}"
+                )
 
         # Training loop
         self.model.train()
         train_iter = iter(self.train_loader)
         accumulated_loss = 0.0
+        micro_since_update = 0
 
         progress = tqdm(
-            range(self.global_step, self.max_steps),
-            initial=self.global_step,
-            total=self.max_steps,
-            desc="Training",
+            total=self.max_update_steps,
+            initial=self.optimizer_step,
+            desc="Training (updates)",
         )
 
-        for step in progress:
-            log_step = step + 1
-            log_attn = self.metrics.writer is not None and log_step % self.log_every == 0
+        while self.optimizer_step < self.max_update_steps:
+            next_is_update = (micro_since_update + 1) >= self.grad_accum_steps
+            next_update_step = self.optimizer_step + 1
+            log_attn = (
+                self.metrics.writer is not None
+                and next_is_update
+                and next_update_step % self.log_every_updates == 0
+            )
             self._set_attention_logging(log_attn)
 
             # Get batch
@@ -178,9 +250,12 @@ class Trainer:
             # Backward pass
             self.scaler.scale(loss).backward()
             accumulated_loss += loss.item()
+            micro_since_update += 1
+            self.micro_step += 1
+            self.global_step = self.micro_step
 
             # Optimizer step (after gradient accumulation)
-            if (step + 1) % self.grad_accum_steps == 0:
+            if micro_since_update >= self.grad_accum_steps:
                 # Unscale for gradient clipping
                 self.scaler.unscale_(self.optimizer)
 
@@ -191,8 +266,8 @@ class Trainer:
                     )
                     metrics["grad_norm"] = grad_norm.item()
 
-                log_step = step + 1
-                if self.metrics.writer and log_step % self.log_every == 0:
+                log_step = next_update_step
+                if self.metrics.writer and log_step % self.log_every_updates == 0:
                     self.metrics.log_gradient_stats(self.model, step=log_step, prefix="train")
 
                 # Optimizer step
@@ -202,15 +277,20 @@ class Trainer:
 
                 # Scheduler step
                 self.scheduler.step()
+                self.optimizer_step += 1
+                progress.update(1)
+                micro_since_update = 0
 
-                # Record loss
-                metrics["loss"] = accumulated_loss * self.grad_accum_steps
+                # Record loss (already averaged over grad_accum_steps)
+                metrics["loss"] = accumulated_loss
                 metrics["lr"] = self.scheduler.get_last_lr()[0]
+                metrics["micro_step"] = float(self.micro_step)
+                metrics["optimizer_step"] = float(self.optimizer_step)
                 self.metrics.update(metrics)
                 accumulated_loss = 0.0
 
                 # Diagnostics logging
-                if self.metrics.writer and log_step % self.log_every == 0:
+                if self.metrics.writer and log_step % self.log_every_updates == 0:
                     if self._last_pred_tokens is not None:
                         self.metrics.log_codebook_utilization(
                             self._last_pred_tokens,
@@ -219,7 +299,7 @@ class Trainer:
                             prefix="train",
                             pad_token_id=getattr(self.model, "pad_token_id", None),
                             audio_lengths=self._last_audio_lengths,
-                            warn_after_step=self.warn_after_step,
+                            warn_after_step=self.warn_after_updates,
                         )
                     attn = None
                     if hasattr(self.model, "layers") and self.model.layers:
@@ -231,43 +311,41 @@ class Trainer:
                             attn,
                             step=log_step,
                             prefix="train",
-                            warn_after_step=self.warn_after_step,
+                            warn_after_step=self.warn_after_updates,
                         )
 
-            self.global_step = step + 1
+                # Logging
+                if self.optimizer_step % self.log_every_updates == 0:
+                    logged = self.metrics.log(self.optimizer_step)
+                    progress.set_postfix(
+                        loss=f"{logged.get('loss', 0):.4f}",
+                        lr=f"{logged.get('lr', 0):.2e}",
+                    )
 
-            # Logging
-            if self.global_step % self.log_every == 0:
-                logged = self.metrics.log(self.global_step)
-                progress.set_postfix(
-                    loss=f"{logged.get('loss', 0):.4f}",
-                    lr=f"{logged.get('lr', 0):.2e}",
-                )
+                # Evaluation
+                if self.val_loader and self.optimizer_step % self.eval_every_updates == 0:
+                    val_metrics = self.evaluate()
+                    self.metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+                    if val_metrics:
+                        val_loss = val_metrics.get("loss")
+                        val_ppl = val_metrics.get("perplexity")
+                        msg = f"Eval @ update {self.optimizer_step}: val_loss={val_loss:.4f}"
+                        if val_ppl is not None:
+                            msg += f", val_ppl={val_ppl:.2f}"
+                        print(msg)
 
-            # Evaluation
-            if self.val_loader and self.global_step % self.eval_every == 0:
-                val_metrics = self.evaluate()
-                self.metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
-                if val_metrics:
-                    val_loss = val_metrics.get("loss")
-                    val_ppl = val_metrics.get("perplexity")
-                    msg = f"Eval @ step {self.global_step}: val_loss={val_loss:.4f}"
-                    if val_ppl is not None:
-                        msg += f", val_ppl={val_ppl:.2f}"
-                    print(msg)
+                    # Check for best model
+                    if val_metrics.get("loss", float("inf")) < self.best_val_loss:
+                        self.best_val_loss = val_metrics["loss"]
+                        self._save_checkpoint("checkpoint_best.pt")
 
-                # Check for best model
-                if val_metrics.get("loss", float("inf")) < self.best_val_loss:
-                    self.best_val_loss = val_metrics["loss"]
-                    self._save_checkpoint("checkpoint_best.pt")
-
-            # Checkpointing
-            if self.global_step % self.checkpoint_every == 0:
-                self._save_checkpoint(f"checkpoint_{self.global_step}.pt")
-                cleanup_checkpoints(str(self.checkpoint_dir), keep_last=5)
+                # Checkpointing
+                if self.optimizer_step % self.checkpoint_every_updates == 0:
+                    self._save_checkpoint(f"checkpoint_{self.micro_step}.pt")
+                    cleanup_checkpoints(str(self.checkpoint_dir), keep_last=5)
 
         # Final checkpoint
-        self._save_checkpoint(f"checkpoint_{self.global_step}.pt")
+        self._save_checkpoint(f"checkpoint_{self.micro_step}.pt")
 
         # Save metrics history
         self.metrics.save_history(str(self.log_dir / "metrics.json"))
@@ -434,7 +512,7 @@ class Trainer:
         audio_lengths: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Apply input token noise during teacher forcing to reduce collapse."""
-        prob = self._token_noise_prob_for_step(self.global_step)
+        prob = self._token_noise_prob_for_step(self.optimizer_step)
         if prob <= 0:
             return audio_tokens
 
@@ -463,11 +541,11 @@ class Trainer:
         """Ramp token noise down after warmup."""
         if self.token_noise_prob <= 0:
             return 0.0
-        if self.token_noise_warmup_steps <= 0:
+        if self.token_noise_warmup_updates <= 0:
             return float(self.token_noise_prob)
-        if step >= self.token_noise_warmup_steps:
+        if step >= self.token_noise_warmup_updates:
             return 0.0
-        remaining = 1.0 - (step / float(self.token_noise_warmup_steps))
+        remaining = 1.0 - (step / float(self.token_noise_warmup_updates))
         return float(self.token_noise_prob * max(0.0, remaining))
 
     def _ar_scheduled_sampling_step(
@@ -479,7 +557,9 @@ class Trainer:
         audio_lengths: Optional[torch.Tensor],
     ) -> tuple:
         """AR training with scheduled sampling."""
-        teacher_forcing_ratio = self.get_teacher_forcing_ratio(self.global_step, self.max_steps)
+        teacher_forcing_ratio = self.get_teacher_forcing_ratio(
+            self.optimizer_step, self.max_update_steps
+        )
 
         text_emb, text_mask = self.model.encode_text(text_tokens, text_lengths)
 
@@ -573,7 +653,7 @@ class Trainer:
         audio_lengths: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         """Encourage higher entropy over codebook logits early in training."""
-        weight = self._codebook_entropy_weight_for_step(self.global_step)
+        weight = self._codebook_entropy_weight_for_step(self.optimizer_step)
         if weight <= 0:
             return None
 
@@ -593,12 +673,12 @@ class Trainer:
         """Ramp entropy regularization down after warmup."""
         if self.codebook_entropy_weight <= 0:
             return 0.0
-        if self.codebook_entropy_warmup_steps <= 0:
+        if self.codebook_entropy_warmup_updates <= 0:
             return float(self.codebook_entropy_weight)
-        if step >= self.codebook_entropy_warmup_steps:
+        if step >= self.codebook_entropy_warmup_updates:
             return 0.0
         # Linear decay to 0 over warmup window
-        remaining = 1.0 - (step / float(self.codebook_entropy_warmup_steps))
+        remaining = 1.0 - (step / float(self.codebook_entropy_warmup_updates))
         return float(self.codebook_entropy_weight * max(0.0, remaining))
 
     @torch.no_grad()
@@ -647,6 +727,8 @@ class Trainer:
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             step=self.global_step,
+            optimizer_step=self.optimizer_step,
+            micro_step=self.micro_step,
             config=self.config,
             path=str(self.checkpoint_dir / filename),
             scaler=self.scaler,

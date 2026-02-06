@@ -20,6 +20,8 @@ def save_checkpoint(
     step: int,
     config: dict,
     path: str,
+    optimizer_step: Optional[int] = None,
+    micro_step: Optional[int] = None,
     scaler: Optional[Any] = None,
     metrics: Optional[dict] = None,
     random_state: Optional[dict] = None,
@@ -35,6 +37,8 @@ def save_checkpoint(
         optimizer: Optimizer state
         scheduler: LR scheduler state
         step: Current training step
+        optimizer_step: Optimizer update index (optional)
+        micro_step: Micro-step index (optional)
         config: Training configuration
         path: Output path
         scaler: Gradient scaler state (optional)
@@ -46,6 +50,8 @@ def save_checkpoint(
 
     checkpoint = {
         "step": step,
+        "optimizer_step": optimizer_step,
+        "micro_step": micro_step if micro_step is not None else step,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
@@ -84,6 +90,8 @@ def save_checkpoint(
         json.dump(
             {
                 "step": step,
+                "optimizer_step": optimizer_step,
+                "micro_step": micro_step if micro_step is not None else step,
                 "config": config,
                 "metrics": metrics or {},
                 "training_time": training_time,
@@ -177,6 +185,8 @@ def load_checkpoint(
 
     return {
         "step": checkpoint.get("step", 0),
+        "optimizer_step": checkpoint.get("optimizer_step"),
+        "micro_step": checkpoint.get("micro_step", checkpoint.get("step", 0)),
         "config": checkpoint.get("config", {}),
         "metrics": checkpoint.get("metrics", {}),
         "random_state": checkpoint.get("random_state"),

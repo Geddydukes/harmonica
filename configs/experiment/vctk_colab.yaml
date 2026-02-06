@@ -28,26 +28,36 @@ data:
 
 training:
   batch_size: 1
-  grad_accum_steps: 16
-  max_steps: 100000
+  grad_accum_steps: 8
+  # Explicit update-step controls (preferred).
+  max_update_steps: 8000
+  warmup_update_steps: 100
+  log_every_updates: 25
+  eval_every_updates: 250
+  checkpoint_every_updates: 1000
+  warn_after_updates: 250
+  # Legacy micro-step fields kept for compatibility with older trainer versions.
+  max_steps: 64000
+  warmup_steps: 800
+  log_every: 200
+  eval_every: 2000
+  checkpoint_every: 8000
+  warn_after_step: 2000
   lr: 7.0e-5
-  warmup_steps: 500
   weight_decay: 0.01
   max_grad_norm: 1.0
   mixed_precision: true
-  checkpoint_every: 5000
-  eval_every: 1000
-  log_every: 100
   scheduled_sampling: false
   label_smoothing: 0.05
   # Encourage broader codebook usage early to prevent collapse.
   codebook_entropy_weight: 0.12
+  codebook_entropy_warmup_updates: 2500
   codebook_entropy_warmup_steps: 20000
   # Input token noise to avoid early mode collapse.
   token_noise_prob: 0.10
+  token_noise_warmup_updates: 2500
   token_noise_warmup_steps: 20000
-  scheduler_type: "cosine_warmup"
-  min_lr_ratio: 0.2
+  scheduler_type: "constant_warmup"
 
 codec:
   type: "encodec"

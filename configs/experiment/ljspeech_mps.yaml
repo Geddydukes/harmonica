@@ -22,29 +22,42 @@ data:
   dataset: "ljspeech"
   data_dir: "./data/LJSpeech-1.1"
   cache_dir: "./cache/ljspeech"
-  max_audio_len: 4.0
+  max_audio_len: 3.0
   min_audio_len: 0.5
   num_workers: 0
 
 training:
   batch_size: 1
-  grad_accum_steps: 32
-  max_steps: 50000
-  lr: 3.0e-5
-  warmup_steps: 500
-  scheduler_type: "cosine_warmup"
-  min_lr_ratio: 0.2
+  grad_accum_steps: 8
+  # Explicit update-step controls (preferred).
+  max_update_steps: 4000
+  warmup_update_steps: 80
+  log_every_updates: 25
+  eval_every_updates: 200
+  checkpoint_every_updates: 800
+  warn_after_updates: 200
+  # Legacy micro-step fields kept for compatibility with older trainer versions.
+  max_steps: 32000
+  warmup_steps: 640
+  log_every: 200
+  eval_every: 1600
+  checkpoint_every: 6400
+  warn_after_step: 1600
+  lr: 6.0e-5
+  scheduler_type: "constant_warmup"
   weight_decay: 0.01
   max_grad_norm: 1.0
   mixed_precision: true
-  checkpoint_every: 5000
-  eval_every: 1000
-  log_every: 100
   scheduled_sampling: false
   label_smoothing: 0.05
   # Encourage broader codebook usage early to prevent collapse.
-  codebook_entropy_weight: 0.03
-  codebook_entropy_warmup_steps: 15000
+  codebook_entropy_weight: 0.06
+  codebook_entropy_warmup_updates: 2500
+  codebook_entropy_warmup_steps: 20000
+  # Input token noise to avoid early mode collapse.
+  token_noise_prob: 0.10
+  token_noise_warmup_updates: 2500
+  token_noise_warmup_steps: 20000
 
 codec:
   type: "encodec"

@@ -16,6 +16,27 @@ class DummyDataset(torch.utils.data.Dataset):
         return idx
 
 
+class DummyBatch:
+    def __init__(self):
+        self.codec_tokens = torch.zeros(1, 1, 1, dtype=torch.long)
+        self.audio_lengths = torch.ones(1, dtype=torch.long)
+        self.text_tokens = torch.ones(1, 1, dtype=torch.long)
+        self.text_lengths = torch.ones(1, dtype=torch.long)
+        self.prompt_tokens = None
+        self.prompt_lengths = None
+
+    def to(self, _device):
+        return self
+
+
+class DummyBatchDataset(torch.utils.data.Dataset):
+    def __len__(self):
+        return 8
+
+    def __getitem__(self, _idx):
+        return DummyBatch()
+
+
 def test_audio_preprocessor_trim_and_normalize():
     pre = AudioPreprocessor(
         target_sample_rate=24000,
@@ -248,3 +269,170 @@ def test_stop_token_training_appends_target():
     assert model.vocab_size == 17
     assert trainer._last_pred_tokens.shape[1] == audio_tokens.shape[1] + 1
     assert loss.item() > 0
+
+
+def test_update_step_conversion_from_legacy_micro_steps():
+    dummy_model = torch.nn.Linear(4, 4)
+    dummy_loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=1)
+    config = {
+        "training": {
+            "grad_accum_steps": 4,
+            "max_steps": 10,
+            "warmup_steps": 5,
+            "log_every": 8,
+            "eval_every": 12,
+            "checkpoint_every": 20,
+            "warn_after_step": 6,
+            "codebook_entropy_warmup_steps": 9,
+            "token_noise_warmup_steps": 7,
+        },
+        "experiment": {},
+        "device": {"prefer": "cpu"},
+    }
+
+    trainer = Trainer(
+        model=dummy_model,
+        config=config,
+        train_loader=dummy_loader,
+        device=torch.device("cpu"),
+    )
+
+    assert trainer.max_update_steps == 3
+    assert trainer.warmup_update_steps == 2
+    assert trainer.log_every_updates == 2
+    assert trainer.eval_every_updates == 3
+    assert trainer.checkpoint_every_updates == 5
+    assert trainer.warn_after_updates == 2
+    assert trainer.codebook_entropy_warmup_updates == 3
+    assert trainer.token_noise_warmup_updates == 2
+
+
+def test_entropy_and_noise_decay_use_update_steps():
+    dummy_model = torch.nn.Linear(4, 4)
+    dummy_loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=1)
+    config = {
+        "training": {
+            "max_update_steps": 20,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 100,
+            "checkpoint_every_updates": 100,
+            "codebook_entropy_weight": 0.2,
+            "codebook_entropy_warmup_updates": 4,
+            "token_noise_prob": 0.3,
+            "token_noise_warmup_updates": 4,
+        },
+        "experiment": {},
+        "device": {"prefer": "cpu"},
+    }
+
+    trainer = Trainer(
+        model=dummy_model,
+        config=config,
+        train_loader=dummy_loader,
+        device=torch.device("cpu"),
+    )
+
+    assert trainer._codebook_entropy_weight_for_step(0) == pytest.approx(0.2)
+    assert trainer._codebook_entropy_weight_for_step(2) == pytest.approx(0.1)
+    assert trainer._codebook_entropy_weight_for_step(4) == pytest.approx(0.0)
+
+    assert trainer._token_noise_prob_for_step(0) == pytest.approx(0.3)
+    assert trainer._token_noise_prob_for_step(2) == pytest.approx(0.15)
+    assert trainer._token_noise_prob_for_step(4) == pytest.approx(0.0)
+
+
+def test_scheduled_sampling_uses_optimizer_step_not_micro_step():
+    model = _make_small_ar_model(length_control_mode="duration_predictor")
+    dummy_loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=1)
+    config = {
+        "training": {
+            "scheduled_sampling": True,
+            "teacher_forcing_schedule": "linear",
+            "teacher_forcing_start": 1.0,
+            "teacher_forcing_end": 0.5,
+            "max_update_steps": 10,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 100,
+            "checkpoint_every_updates": 100,
+        },
+        "experiment": {},
+        "device": {"prefer": "cpu"},
+    }
+    trainer = Trainer(
+        model=model,
+        config=config,
+        train_loader=dummy_loader,
+        device=torch.device("cpu"),
+    )
+    trainer.optimizer_step = 5
+    trainer.micro_step = 20
+    trainer.global_step = trainer.micro_step
+
+    called = {}
+
+    def fake_ratio(step, max_steps):
+        called["step"] = step
+        called["max_steps"] = max_steps
+        return 1.0
+
+    trainer.get_teacher_forcing_ratio = fake_ratio
+
+    audio_tokens = torch.randint(0, 16, (1, 4))
+    text_tokens = torch.randint(0, 16, (1, 3))
+    text_lengths = torch.tensor([3])
+    audio_lengths = torch.tensor([4])
+
+    loss, _ = trainer._ar_scheduled_sampling_step(
+        audio_tokens=audio_tokens,
+        text_tokens=text_tokens,
+        text_lengths=text_lengths,
+        prompt_tokens=None,
+        audio_lengths=audio_lengths,
+    )
+
+    assert loss.item() > 0
+    assert called == {"step": 5, "max_steps": 10}
+
+
+def test_logged_loss_not_over_scaled_by_grad_accum(tmp_path):
+    class ConstantLossTrainer(Trainer):
+        def _compute_loss(self, batch):  # type: ignore[override]
+            param = next(self.model.parameters())
+            loss = param.sum() * 0 + torch.tensor(2.0, device=param.device)
+            return loss, {"accuracy": 0.0, "perplexity": torch.exp(loss.detach()).item()}
+
+    model = torch.nn.Linear(2, 2)
+    loader = torch.utils.data.DataLoader(
+        DummyBatchDataset(),
+        batch_size=1,
+        shuffle=False,
+        collate_fn=lambda batch: batch[0],
+    )
+    config = {
+        "training": {
+            "grad_accum_steps": 2,
+            "max_update_steps": 1,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 100,
+            "checkpoint_every_updates": 100,
+            "mixed_precision": False,
+        },
+        "experiment": {
+            "log_dir": str(tmp_path / "logs"),
+            "checkpoint_dir": str(tmp_path / "ckpts"),
+        },
+        "device": {"prefer": "cpu"},
+    }
+
+    trainer = ConstantLossTrainer(
+        model=model,
+        config=config,
+        train_loader=loader,
+        device=torch.device("cpu"),
+    )
+    summary = trainer.train(resume=False)
+
+    assert summary["final_loss"] == pytest.approx(2.0, rel=1e-4)

@@ -385,13 +385,17 @@ def main():
         print("Training samples: streaming (unknown length)")
 
     # Print key config
+    train_cfg = config.get("training", {})
     print(
         "Config: "
         f"max_seq_len={config.get('model', {}).get('ar', {}).get('max_seq_len', 'n/a')}, "
         f"max_audio_len={config.get('data', {}).get('max_audio_len', 'n/a')}, "
-        f"batch_size={config.get('training', {}).get('batch_size', 'n/a')}, "
-        f"grad_accum_steps={config.get('training', {}).get('grad_accum_steps', 'n/a')}, "
-        f"warmup_steps={config.get('training', {}).get('warmup_steps', 'n/a')}"
+        f"batch_size={train_cfg.get('batch_size', 'n/a')}, "
+        f"grad_accum_steps={train_cfg.get('grad_accum_steps', 'n/a')}, "
+        f"warmup_steps={train_cfg.get('warmup_steps', 'n/a')}, "
+        f"warmup_update_steps={train_cfg.get('warmup_update_steps', 'n/a')}, "
+        f"max_steps={train_cfg.get('max_steps', 'n/a')}, "
+        f"max_update_steps={train_cfg.get('max_update_steps', 'n/a')}"
     )
 
     # Create model
