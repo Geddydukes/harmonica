@@ -46,6 +46,7 @@ data:
   cache_dir: "./cache"
   max_audio_len: 10.0         # seconds
   min_audio_len: 0.5          # seconds
+  val_split: 0.02             # fraction of data for validation (0 disables)
   num_workers: 4
 
 # Training configuration

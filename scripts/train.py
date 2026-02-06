@@ -5,6 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 from functools import partial
+from typing import Optional
 import yaml
 
 import torch
@@ -49,7 +50,11 @@ def merge_configs(base: dict, override: dict) -> dict:
     return result
 
 
-def create_dataloader(config: dict, tokenizer: CharTokenizer, codec: EnCodecBackend) -> DataLoader:
+def create_dataloaders(
+    config: dict,
+    tokenizer: CharTokenizer,
+    codec: EnCodecBackend,
+) -> tuple[DataLoader, Optional[DataLoader]]:
     """Create data loader from config."""
     data_cfg = config.get("data", {})
     dataset_type = data_cfg.get("dataset", "ljspeech")
@@ -207,15 +212,21 @@ def create_dataloader(config: dict, tokenizer: CharTokenizer, codec: EnCodecBack
     elif hasattr(dataset, "speaker_ids") and dataset.is_multi_speaker:
         speaker_to_idx = {sid: i for i, sid in enumerate(dataset.speaker_ids)}
 
+    max_seq_len = config.get("model", {}).get("ar", {}).get("max_seq_len")
+    if max_seq_len is not None:
+        max_audio_len = max(1, int(max_seq_len) - 1)
+    else:
+        max_audio_len = None
+
     collator = Collator(
         tokenizer=tokenizer,
         codec=codec,
         speaker_to_idx=speaker_to_idx,
         sample_rate=config.get("codec", {}).get("sample_rate", 24000),
-        max_audio_len=config.get("model", {}).get("ar", {}).get("max_seq_len"),
+        max_audio_len=max_audio_len,
     )
 
-    # Create dataloader
+    # Create dataloaders
     train_cfg = config.get("training", {})
     is_streaming = dataset_type == "hf_vctk_stream"
     prefer = str(config.get("device", {}).get("prefer", "")).lower()
@@ -228,8 +239,31 @@ def create_dataloader(config: dict, tokenizer: CharTokenizer, codec: EnCodecBack
     if is_streaming and num_workers > 0:
         num_workers = 0
 
-    dataloader = DataLoader(
-        dataset,
+    val_loader = None
+    val_split = float(data_cfg.get("val_split", 0.0))
+    if is_streaming:
+        val_split = 0.0
+
+    if sampler is not None and val_split > 0:
+        print("Warning: val_split ignored because a sampler is in use.")
+        val_split = 0.0
+
+    if val_split > 0 and hasattr(dataset, "__len__"):
+        total_len = len(dataset)
+        val_len = max(1, int(total_len * val_split))
+        train_len = total_len - val_len
+        generator = torch.Generator().manual_seed(
+            config.get("experiment", {}).get("seed", 42)
+        )
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            dataset, [train_len, val_len], generator=generator
+        )
+    else:
+        train_dataset = dataset
+        val_dataset = None
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=train_cfg.get("batch_size", 8),
         shuffle=False if is_streaming else sampler is None,
         sampler=sampler,
@@ -239,7 +273,19 @@ def create_dataloader(config: dict, tokenizer: CharTokenizer, codec: EnCodecBack
         drop_last=False if is_streaming else True,
     )
 
-    return dataloader
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=train_cfg.get("batch_size", 8),
+            shuffle=False,
+            sampler=None,
+            num_workers=num_workers,
+            collate_fn=collator,
+            pin_memory=pin_memory,
+            drop_last=False,
+        )
+
+    return train_loader, val_loader
 
 
 def main():
@@ -308,7 +354,7 @@ def main():
     tokenizer = CharTokenizer()
 
     # Create data loader
-    train_loader = create_dataloader(config, tokenizer, codec)
+    train_loader, val_loader = create_dataloaders(config, tokenizer, codec)
     try:
         print(f"Training samples: {len(train_loader.dataset)}")
     except TypeError:
@@ -354,6 +400,7 @@ def main():
         model=model,
         config=config,
         train_loader=train_loader,
+        val_loader=val_loader,
         device=device,
     )
 
