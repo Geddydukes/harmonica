@@ -175,6 +175,7 @@ class MetricsTracker:
         prefix: str = "train",
         pad_token_id: int | None = None,
         audio_lengths: torch.Tensor | None = None,
+        warn_after_step: int | None = None,
     ) -> None:
         """Log codebook utilization and token histogram."""
         if self.writer is None:
@@ -206,7 +207,7 @@ class MetricsTracker:
             f"{prefix}/token_distribution", token_counts, step
         )
 
-        if utilization < 0.3:
+        if utilization < 0.3 and (warn_after_step is None or step >= warn_after_step):
             print(f"WARNING: Codebook collapse detected! Only {utilization:.1%} of vocab used")
 
     def log_attention_entropy(
@@ -214,6 +215,7 @@ class MetricsTracker:
         attention_weights: torch.Tensor,
         step: int,
         prefix: str = "train",
+        warn_after_step: int | None = None,
     ) -> None:
         """Log attention entropy and diversity."""
         if self.writer is None:
@@ -228,7 +230,7 @@ class MetricsTracker:
         head_entropy_std = entropy.mean(dim=[0, 2]).std().item()
         self.writer.add_scalar(f"{prefix}/attention_diversity", head_entropy_std, step)
 
-        if head_entropy_std < 0.1:
+        if head_entropy_std < 0.1 and (warn_after_step is None or step >= warn_after_step):
             print("WARNING: Attention collapse detected! All heads doing similar things")
 
     def log_gradient_stats(

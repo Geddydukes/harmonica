@@ -39,6 +39,29 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def warn_cache_mismatch(config: dict) -> None:
+    """Warn if cached preprocessing settings differ from current config."""
+    data_cfg = config.get("data", {})
+    cache_dir = Path(data_cfg.get("cache_dir", ""))
+    if not cache_dir:
+        return
+    metadata_path = cache_dir / "metadata.pt"
+    if not metadata_path.exists():
+        return
+    try:
+        metadata = torch.load(metadata_path, map_location="cpu")
+    except Exception:
+        return
+    preprocess = metadata.get("preprocess", {})
+    cached_max = preprocess.get("max_duration")
+    cfg_max = data_cfg.get("max_audio_len")
+    if cached_max is not None and cfg_max is not None and cached_max > cfg_max:
+        print(
+            f"WARNING: Cache max_duration ({cached_max}s) > config max_audio_len ({cfg_max}s). "
+            "Consider re-preprocessing to avoid truncation."
+        )
+
+
 def merge_configs(base: dict, override: dict) -> dict:
     """Merge two config dicts, with override taking precedence."""
     result = base.copy()
@@ -353,12 +376,23 @@ def main():
     # Setup tokenizer
     tokenizer = CharTokenizer()
 
-    # Create data loader
+    # Create data loaders
     train_loader, val_loader = create_dataloaders(config, tokenizer, codec)
+    warn_cache_mismatch(config)
     try:
         print(f"Training samples: {len(train_loader.dataset)}")
     except TypeError:
         print("Training samples: streaming (unknown length)")
+
+    # Print key config
+    print(
+        "Config: "
+        f"max_seq_len={config.get('model', {}).get('ar', {}).get('max_seq_len', 'n/a')}, "
+        f"max_audio_len={config.get('data', {}).get('max_audio_len', 'n/a')}, "
+        f"batch_size={config.get('training', {}).get('batch_size', 'n/a')}, "
+        f"grad_accum_steps={config.get('training', {}).get('grad_accum_steps', 'n/a')}, "
+        f"warmup_steps={config.get('training', {}).get('warmup_steps', 'n/a')}"
+    )
 
     # Create model
     if args.model_type == "ar":

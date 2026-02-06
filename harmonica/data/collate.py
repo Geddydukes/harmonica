@@ -91,6 +91,7 @@ class Collator:
             target_sample_rate=sample_rate
         )
         self.max_audio_len = max_audio_len
+        self._trunc_warned = False
 
     def __call__(self, samples: List[Dict[str, Any]]) -> HarmonicaBatch:
         """Collate samples into a batch.
@@ -131,6 +132,12 @@ class Collator:
 
             if self.max_audio_len is not None and tokens.shape[-1] > self.max_audio_len:
                 tokens = tokens[..., : self.max_audio_len]
+                if not self._trunc_warned:
+                    print(
+                        f"WARNING: Truncating audio tokens to max_audio_len={self.max_audio_len}. "
+                        "Consider lowering max_audio_len or re-preprocessing."
+                    )
+                    self._trunc_warned = True
 
             codec_tokens_list.append(tokens)
             audio_lengths.append(tokens.shape[-1])

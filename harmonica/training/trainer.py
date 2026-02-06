@@ -66,6 +66,9 @@ class Trainer:
         self.teacher_forcing_start = train_cfg.get("teacher_forcing_start", 1.0)
         self.teacher_forcing_end = train_cfg.get("teacher_forcing_end", 0.3)
         self.duration_loss_weight = train_cfg.get("duration_loss_weight", 0.0)
+        self.warn_after_step = train_cfg.get("warn_after_step", 2000)
+        self.codebook_entropy_weight = train_cfg.get("codebook_entropy_weight", 0.0)
+        self.codebook_entropy_warmup_steps = train_cfg.get("codebook_entropy_warmup_steps", 0)
 
         # Create optimizer and scheduler
         self.optimizer = create_optimizer(
@@ -78,6 +81,12 @@ class Trainer:
             warmup_steps=train_cfg.get("warmup_steps", 1000),
             max_steps=self.max_steps,
         )
+        warmup_steps = train_cfg.get("warmup_steps", 1000)
+        if warmup_steps < self.grad_accum_steps:
+            print(
+                f"Warning: warmup_steps ({warmup_steps}) < grad_accum_steps "
+                f"({self.grad_accum_steps}). Warmup will be very short."
+            )
 
         # Mixed precision
         use_mixed = train_cfg.get("mixed_precision", True) and supports_mixed_precision(self.device)
@@ -206,6 +215,7 @@ class Trainer:
                             prefix="train",
                             pad_token_id=getattr(self.model, "pad_token_id", None),
                             audio_lengths=self._last_audio_lengths,
+                            warn_after_step=self.warn_after_step,
                         )
                     attn = None
                     if hasattr(self.model, "layers") and self.model.layers:
@@ -213,7 +223,12 @@ class Trainer:
                         if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "last_attn_weights"):
                             attn = layer.self_attn.last_attn_weights
                     if attn is not None:
-                        self.metrics.log_attention_entropy(attn, step=log_step, prefix="train")
+                        self.metrics.log_attention_entropy(
+                            attn,
+                            step=log_step,
+                            prefix="train",
+                            warn_after_step=self.warn_after_step,
+                        )
 
             self.global_step = step + 1
 
@@ -372,6 +387,10 @@ class Trainer:
         else:
             loss = loss.mean()
 
+        entropy_loss = self._maybe_entropy_regularize(logits, audio_lengths)
+        if entropy_loss is not None:
+            loss = loss + entropy_loss
+
         duration_loss = None
         if (
             hasattr(self.model, "duration_predictor")
@@ -398,6 +417,8 @@ class Trainer:
             "accuracy": accuracy.item(),
             "perplexity": perplexity.item(),
         }
+        if entropy_loss is not None:
+            metrics["codebook_entropy_loss"] = entropy_loss.item()
         if duration_loss is not None:
             metrics["duration_loss"] = duration_loss.item()
         return loss, metrics
@@ -463,6 +484,10 @@ class Trainer:
         else:
             loss = loss.mean()
 
+        entropy_loss = self._maybe_entropy_regularize(all_logits, audio_lengths)
+        if entropy_loss is not None:
+            loss = loss + entropy_loss
+
         duration_loss = None
         if (
             hasattr(self.model, "duration_predictor")
@@ -488,10 +513,46 @@ class Trainer:
             "perplexity": perplexity.item(),
             "teacher_forcing_ratio": teacher_forcing_ratio,
         }
+        if entropy_loss is not None:
+            metrics["codebook_entropy_loss"] = entropy_loss.item()
         if duration_loss is not None:
             metrics["duration_loss"] = duration_loss.item()
 
         return loss, metrics
+
+    def _maybe_entropy_regularize(
+        self,
+        logits: torch.Tensor,
+        audio_lengths: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Encourage higher entropy over codebook logits early in training."""
+        weight = self._codebook_entropy_weight_for_step(self.global_step)
+        if weight <= 0:
+            return None
+
+        probs = torch.softmax(logits.float(), dim=-1)
+        entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1)  # [B, L]
+        if audio_lengths is not None:
+            B, L = entropy.shape
+            mask = torch.arange(L, device=entropy.device).expand(B, L) < audio_lengths.unsqueeze(1)
+            entropy = (entropy * mask.float()).sum() / mask.float().sum()
+        else:
+            entropy = entropy.mean()
+
+        # Negative entropy to maximize entropy
+        return weight * (-entropy)
+
+    def _codebook_entropy_weight_for_step(self, step: int) -> float:
+        """Ramp entropy regularization down after warmup."""
+        if self.codebook_entropy_weight <= 0:
+            return 0.0
+        if self.codebook_entropy_warmup_steps <= 0:
+            return float(self.codebook_entropy_weight)
+        if step >= self.codebook_entropy_warmup_steps:
+            return 0.0
+        # Linear decay to 0 over warmup window
+        remaining = 1.0 - (step / float(self.codebook_entropy_warmup_steps))
+        return float(self.codebook_entropy_weight * max(0.0, remaining))
 
     @torch.no_grad()
     def evaluate(self) -> Dict[str, float]:
