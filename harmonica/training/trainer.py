@@ -229,6 +229,13 @@ class Trainer:
             if self.val_loader and self.global_step % self.eval_every == 0:
                 val_metrics = self.evaluate()
                 self.metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+                if val_metrics:
+                    val_loss = val_metrics.get("loss")
+                    val_ppl = val_metrics.get("perplexity")
+                    msg = f"Eval @ step {self.global_step}: val_loss={val_loss:.4f}"
+                    if val_ppl is not None:
+                        msg += f", val_ppl={val_ppl:.2f}"
+                    print(msg)
 
                 # Check for best model
                 if val_metrics.get("loss", float("inf")) < self.best_val_loss:
@@ -499,7 +506,7 @@ class Trainer:
         total_acc = 0.0
         n_batches = 0
 
-        for batch in tqdm(self.val_loader, desc="Evaluating", leave=False):
+        for batch in self.val_loader:
             batch = batch.to(self.device)
 
             with torch.autocast(
