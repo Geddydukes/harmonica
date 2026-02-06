@@ -80,6 +80,8 @@ class Trainer:
             self.optimizer,
             warmup_steps=train_cfg.get("warmup_steps", 1000),
             max_steps=self.max_steps,
+            scheduler_type=train_cfg.get("scheduler_type", "cosine_warmup"),
+            min_lr_ratio=train_cfg.get("min_lr_ratio", 0.1),
         )
         warmup_steps = train_cfg.get("warmup_steps", 1000)
         if warmup_steps < self.grad_accum_steps:
