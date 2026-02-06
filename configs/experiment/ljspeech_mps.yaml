@@ -10,10 +10,10 @@ model:
   ar:
     vocab_size: 1024
     text_vocab_size: 128
-    d_model: 256
+    d_model: 192
     n_heads: 4
-    n_layers: 8
-    d_ff: 1024
+    n_layers: 6
+    d_ff: 768
     dropout: 0.1
     max_seq_len: 1024
     max_text_len: 256
@@ -22,7 +22,7 @@ data:
   dataset: "ljspeech"
   data_dir: "./data/LJSpeech-1.1"
   cache_dir: "./cache/ljspeech"
-  max_audio_len: 6.0
+  max_audio_len: 4.0
   min_audio_len: 0.5
   num_workers: 0
 

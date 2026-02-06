@@ -54,6 +54,9 @@ class SinusoidalPositionalEncoding(nn.Module):
         Returns:
             Tensor with positional encoding added [B, L, D]
         """
+        max_len = self.pe.size(1)
+        if x.size(1) > max_len:
+            x = x[:, :max_len, :]
         x = x + self.pe[:, : x.size(1), :]
         return self.dropout(x)
 
@@ -94,6 +97,9 @@ class LearnedPositionalEncoding(nn.Module):
             Tensor with positional encoding added [B, L, D]
         """
         seq_len = x.size(1)
+        if seq_len > self.max_len:
+            x = x[:, : self.max_len, :]
+            seq_len = self.max_len
         positions = torch.arange(seq_len, device=x.device)
         pos_emb = self.embedding(positions)  # [L, D]
         x = x + pos_emb.unsqueeze(0)
