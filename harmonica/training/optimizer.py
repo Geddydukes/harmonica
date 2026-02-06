@@ -1,7 +1,7 @@
 """Optimizer and learning rate scheduler utilities."""
 
 import math
-from typing import Optional, Iterator
+from typing import Optional, Iterator, Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ def create_optimizer(
     betas: tuple = (0.9, 0.95),
     eps: float = 1e-8,
     optimizer_type: str = "adamw",
+    param_group_lr_multipliers: Optional[Dict[str, float]] = None,
 ) -> torch.optim.Optimizer:
     """Create optimizer with weight decay handling.
 
@@ -26,28 +27,69 @@ def create_optimizer(
         betas: Adam betas
         eps: Adam epsilon
         optimizer_type: "adamw" or "adam"
+        param_group_lr_multipliers: Optional LR multipliers by param group
+            keys: default, embedding, text_encoder, output, speaker
 
     Returns:
         Configured optimizer
     """
-    # Separate parameters that should/shouldn't have weight decay
-    decay_params = []
-    no_decay_params = []
+    multipliers = {
+        "default": 1.0,
+        "embedding": 1.0,
+        "text_encoder": 1.0,
+        "output": 1.0,
+        "speaker": 1.0,
+    }
+    if param_group_lr_multipliers:
+        for key, value in param_group_lr_multipliers.items():
+            if key in multipliers:
+                multipliers[key] = float(value)
+
+    def _param_group_name(param_name: str) -> str:
+        if (
+            "speaker_encoder" in param_name
+            or "speaker_table" in param_name
+            or "ref_encoder" in param_name
+            or "align_proj" in param_name
+        ):
+            return "speaker"
+        if "text_encoder" in param_name:
+            return "text_encoder"
+        if "output_proj" in param_name or "output_projs" in param_name:
+            return "output"
+        if (
+            "embedding" in param_name
+            or "embeddings" in param_name
+            or "bos_token" in param_name
+            or "length_embedding" in param_name
+            or "codebook_idx_embedding" in param_name
+        ):
+            return "embedding"
+        return "default"
+
+    grouped: Dict[Tuple[str, bool], list] = {}
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
 
         # No weight decay for biases and layer norms
-        if "bias" in name or "norm" in name or "embedding" in name:
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
+        use_decay = not ("bias" in name or "norm" in name or "embedding" in name)
+        group_name = _param_group_name(name)
+        key = (group_name, use_decay)
+        grouped.setdefault(key, []).append(param)
 
-    param_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ]
+    param_groups = []
+    for (group_name, use_decay), params in grouped.items():
+        if not params:
+            continue
+        param_groups.append(
+            {
+                "params": params,
+                "weight_decay": weight_decay if use_decay else 0.0,
+                "lr": lr * multipliers.get(group_name, 1.0),
+            }
+        )
 
     if optimizer_type == "adamw":
         return AdamW(param_groups, lr=lr, betas=betas, eps=eps)

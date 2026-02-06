@@ -29,6 +29,11 @@ from harmonica.data import (
 from harmonica.data.sampler import CurriculumSampler
 from harmonica.data.collate import Collator, HarmonicaBatch
 from harmonica.training import Trainer, NARTrainer
+from harmonica.config import (
+    validate_config,
+    compute_cache_fingerprint,
+    diff_cache_fingerprint,
+)
 from harmonica.utils.device import get_device
 from harmonica.utils.seed import set_seed
 
@@ -39,8 +44,8 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def warn_cache_mismatch(config: dict) -> None:
-    """Warn if cached preprocessing settings differ from current config."""
+def validate_cache_compatibility(config: dict, allow_mismatch: bool = False) -> None:
+    """Validate cache compatibility against current config fingerprint."""
     data_cfg = config.get("data", {})
     cache_dir = Path(data_cfg.get("cache_dir", ""))
     if not cache_dir:
@@ -52,6 +57,39 @@ def warn_cache_mismatch(config: dict) -> None:
         metadata = torch.load(metadata_path, map_location="cpu")
     except Exception:
         return
+
+    strict_cache_check = bool(data_cfg.get("strict_cache_check", False))
+    enforce = strict_cache_check and not allow_mismatch
+    expected_fp = compute_cache_fingerprint(config)
+    cached_fp = metadata.get("fingerprint")
+
+    if cached_fp:
+        mismatches, missing = diff_cache_fingerprint(expected_fp, cached_fp)
+        if mismatches or missing:
+            print("WARNING: Cache fingerprint mismatch detected.")
+            for item in mismatches[:8]:
+                print(f"  - {item}")
+            for item in missing[:8]:
+                print(f"  - missing: {item}")
+            if len(mismatches) + len(missing) > 8:
+                print("  - ... additional differences omitted ...")
+            print("Hint: re-run `scripts/preprocess.py --config <experiment-config>`.")
+            if enforce:
+                raise RuntimeError(
+                    "Refusing to train with incompatible cache "
+                    "(data.strict_cache_check=true). "
+                    "Use --allow-cache-mismatch to override."
+                )
+        return
+
+    print("WARNING: Cache has no fingerprint metadata; compatibility cannot be guaranteed.")
+    if enforce:
+        raise RuntimeError(
+            "Refusing to train without cache fingerprint "
+            "(data.strict_cache_check=true). Re-run preprocessing with --config."
+        )
+
+    # Backward-compatible guard for older metadata format.
     preprocess = metadata.get("preprocess", {})
     cached_max = preprocess.get("max_duration")
     cfg_max = data_cfg.get("max_audio_len")
@@ -250,6 +288,7 @@ def create_dataloaders(
         tokenizer=tokenizer,
         codec=codec,
         speaker_to_idx=speaker_to_idx,
+        prompt_frames=int(data_cfg.get("prompt_frames", 0)),
         sample_rate=config.get("codec", {}).get("sample_rate", 24000),
         max_audio_len=max_audio_len,
     )
@@ -348,6 +387,11 @@ def main():
         default=None,
         help="Override random seed",
     )
+    parser.add_argument(
+        "--allow-cache-mismatch",
+        action="store_true",
+        help="Proceed even when cache fingerprint does not match current config",
+    )
 
     args = parser.parse_args()
 
@@ -372,6 +416,17 @@ def main():
         exp_cfg["checkpoint_dir"] = str(ckpt_dir)
         exp_cfg["log_dir"] = str(log_dir)
         print(f"NAR outputs: checkpoints={ckpt_dir}, logs={log_dir}")
+
+    validate_config(config, strict=True, context="train")
+    if args.model_type == "nar":
+        nar_cfg = config.get("model", {}).get("nar", {})
+        if nar_cfg.get("use_speaker_conditioning", False):
+            prompt_frames = int(config.get("data", {}).get("prompt_frames", 0))
+            if prompt_frames <= 0:
+                raise ValueError(
+                    "model.nar.use_speaker_conditioning=true requires "
+                    "data.prompt_frames > 0 so speaker prompt tokens are available."
+                )
 
     # Set seed
     seed = config.get("experiment", {}).get("seed", 42)
@@ -399,7 +454,7 @@ def main():
         codec,
         model_type=args.model_type,
     )
-    warn_cache_mismatch(config)
+    validate_cache_compatibility(config, allow_mismatch=args.allow_cache_mismatch)
     try:
         print(f"Training samples: {len(train_loader.dataset)}")
     except TypeError:
@@ -459,6 +514,12 @@ def main():
             max_text_len=model_cfg.get("max_text_len", ar_model_cfg.get("max_text_len", 512)),
             text_padding_idx=model_cfg.get("text_padding_idx", 0),
             n_text_layers=model_cfg.get("n_text_layers", 4),
+            use_speaker_conditioning=model_cfg.get("use_speaker_conditioning", False),
+            speaker_n_codebooks=model_cfg.get(
+                "speaker_n_codebooks",
+                config.get("codec", {}).get("n_codebooks", 8),
+            ),
+            speaker_pooling=model_cfg.get("speaker_pooling", "mean"),
         )
         trainer_cls = NARTrainer
 

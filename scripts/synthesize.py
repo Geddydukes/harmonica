@@ -12,12 +12,36 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from harmonica.codec import EnCodecBackend
+from harmonica.config import validate_config
 from harmonica.text import CharTokenizer
 from harmonica.model import ARTransformer, NARTransformer
 from harmonica.inference import Synthesizer
 from harmonica.training.checkpoint import load_checkpoint
+from harmonica.utils import (
+    build_ar_contract,
+    build_nar_contract,
+    check_ar_nar_compatibility,
+)
 from harmonica.utils.device import get_device
 from harmonica.utils.audio import save_audio
+
+
+def _validate_checkpoint_config(cfg: dict, name: str) -> None:
+    """Best-effort config validation for loaded checkpoints."""
+    try:
+        validate_config(cfg, strict=False, context="eval")
+    except Exception as exc:
+        print(f"Warning: {name} checkpoint config validation failed: {exc}")
+
+
+def _resolve_contract(ckpt: dict, model_key: str, model_cfg: dict, codec_cfg: dict) -> dict:
+    """Load contract from checkpoint metadata or rebuild from config."""
+    contract = ckpt.get("interface_contract")
+    if isinstance(contract, dict):
+        return contract
+    if model_key == "ar":
+        return build_ar_contract(model_cfg, codec_cfg)
+    return build_nar_contract(model_cfg, codec_cfg)
 
 
 def main():
@@ -96,6 +120,9 @@ def main():
     print(f"Loading AR model from {args.ar_checkpoint}")
     ar_ckpt = load_checkpoint(args.ar_checkpoint, device=device)
     ar_config = ar_ckpt["config"]["model"]["ar"]
+    ar_codec_cfg = ar_ckpt["config"].get("codec", {})
+    _validate_checkpoint_config(ar_ckpt.get("config", {}), "AR")
+    ar_contract = _resolve_contract(ar_ckpt, "ar", ar_config, ar_codec_cfg)
 
     tokenizer = CharTokenizer()
 
@@ -120,6 +147,22 @@ def main():
         print(f"Loading NAR model from {args.nar_checkpoint}")
         nar_ckpt = load_checkpoint(args.nar_checkpoint, device=device)
         nar_config = nar_ckpt["config"]["model"]["nar"]
+        nar_codec_cfg = nar_ckpt["config"].get("codec", ar_codec_cfg)
+        _validate_checkpoint_config(nar_ckpt.get("config", {}), "NAR")
+        nar_contract = _resolve_contract(nar_ckpt, "nar", nar_config, nar_codec_cfg)
+
+        compat_errors = check_ar_nar_compatibility(
+            ar_contract,
+            nar_contract,
+            ar_codec_cfg,
+        )
+        if compat_errors:
+            lines = "\n".join(f"  - {err}" for err in compat_errors)
+            raise ValueError(
+                "Incompatible AR/NAR checkpoints detected:\n"
+                f"{lines}\n"
+                "Use checkpoints from the same experiment or retrain NAR with matching AR settings."
+            )
 
         nar_model = NARTransformer(
             n_codebooks=nar_config.get("n_codebooks", 7),
@@ -136,6 +179,12 @@ def main():
             max_text_len=nar_config.get("max_text_len", ar_config.get("max_text_len", 512)),
             text_padding_idx=nar_config.get("text_padding_idx", 0),
             n_text_layers=nar_config.get("n_text_layers", 4),
+            use_speaker_conditioning=nar_config.get("use_speaker_conditioning", False),
+            speaker_n_codebooks=nar_config.get(
+                "speaker_n_codebooks",
+                ar_ckpt.get("config", {}).get("codec", {}).get("n_codebooks", 8),
+            ),
+            speaker_pooling=nar_config.get("speaker_pooling", "mean"),
         )
         load_checkpoint(args.nar_checkpoint, model=nar_model, device=device)
 

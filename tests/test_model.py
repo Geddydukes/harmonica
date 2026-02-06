@@ -247,6 +247,14 @@ class TestARTransformer:
         assert n_params > 1_000_000
         assert n_params < 100_000_000
 
+    def test_interface_contract(self, model):
+        """AR model should expose stable interface contract metadata."""
+        contract = model.get_interface_contract()
+        assert contract["model_type"] == "ar"
+        assert contract["d_model"] == model.d_model
+        assert contract["vocab_size"] == model.codec_vocab_size
+        assert contract["max_seq_len"] == model.max_seq_len
+
 
 class TestNARTransformer:
     """Tests for NAR transformer."""
@@ -359,3 +367,43 @@ class TestNARTransformer:
 
         has_grad = any(p.grad is not None for p in model.parameters())
         assert has_grad
+
+    def test_compute_loss_with_speaker_conditioning(self):
+        """NAR loss should support optional speaker conditioning tokens."""
+        model = NARTransformer(
+            n_codebooks=2,
+            vocab_size=32,
+            d_model=16,
+            n_heads=2,
+            n_layers=1,
+            d_ff=32,
+            max_seq_len=64,
+            text_vocab_size=32,
+            max_text_len=32,
+            n_text_layers=1,
+            use_speaker_conditioning=True,
+            speaker_n_codebooks=8,
+        )
+        ar_tokens = torch.randint(0, 32, (2, 20))
+        target_tokens = torch.randint(0, 32, (2, 2, 20))
+        text_emb = torch.randn(2, 10, 16)
+        speaker_tokens = torch.randint(0, 32, (2, 8, 12))
+        speaker_lengths = torch.tensor([12, 9])
+
+        loss, metrics = model.compute_loss(
+            ar_tokens=ar_tokens,
+            target_tokens=target_tokens,
+            text_emb=text_emb,
+            speaker_tokens=speaker_tokens,
+            speaker_lengths=speaker_lengths,
+        )
+        assert loss.dim() == 0
+        assert metrics["nar_speaker_conditioning"] == pytest.approx(1.0)
+
+    def test_interface_contract(self, model):
+        """NAR model should expose stable interface contract metadata."""
+        contract = model.get_interface_contract()
+        assert contract["model_type"] == "nar"
+        assert contract["d_model"] == model.d_model
+        assert contract["vocab_size"] == model.vocab_size
+        assert contract["n_codebooks"] == model.n_codebooks

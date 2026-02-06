@@ -32,6 +32,9 @@ model:
     max_text_len: 512
     text_padding_idx: 0
     n_text_layers: 4
+    use_speaker_conditioning: false
+    speaker_n_codebooks: 8
+    speaker_pooling: "mean"
 
   # Speaker Encoder
   speaker:
@@ -51,6 +54,8 @@ data:
   cache_dir: "./cache"
   max_audio_len: 10.0         # seconds
   min_audio_len: 0.5          # seconds
+  prompt_frames: 0            # >0 enables speaker prompt extraction in collator
+  strict_cache_check: false   # hard-fail on cache fingerprint mismatch
   val_split: 0.02             # fraction of data for validation (0 disables)
   num_workers: 4
 
@@ -80,6 +85,12 @@ training:
   nar_conditioning_noise_prob: 0.0
   duration_loss_weight: 0.1
   codebook_usage_entropy_weight: 0.0
+  use_ema: false
+  ema_decay: 0.999
+  ema_update_every_updates: 1
+  eval_with_ema: true
+  save_ema_in_checkpoints: true
+  param_group_lr_multipliers: {}  # optional: {embedding: 0.8, output: 1.2, ...}
 
 # Inference configuration
 inference:

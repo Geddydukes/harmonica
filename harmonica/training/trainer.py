@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 import time
 import math
+import copy
 import numpy as np
 
 import torch
@@ -86,6 +87,11 @@ class Trainer:
             "nar_conditioning_noise_prob",
             0.0,
         )
+        self.use_ema = bool(train_cfg.get("use_ema", False))
+        self.ema_decay = float(train_cfg.get("ema_decay", 0.999))
+        self.ema_update_every_updates = max(1, int(train_cfg.get("ema_update_every_updates", 1)))
+        self.eval_with_ema = bool(train_cfg.get("eval_with_ema", True))
+        self.save_ema_in_checkpoints = bool(train_cfg.get("save_ema_in_checkpoints", True))
 
         # Step semantics: schedules and intervals are tracked in optimizer-update units.
         self.max_update_steps = self._resolve_update_steps(
@@ -144,6 +150,7 @@ class Trainer:
             model,
             lr=train_cfg.get("lr", 1e-4),
             weight_decay=train_cfg.get("weight_decay", 0.01),
+            param_group_lr_multipliers=train_cfg.get("param_group_lr_multipliers"),
         )
         self.scheduler = create_scheduler(
             self.optimizer,
@@ -177,6 +184,14 @@ class Trainer:
 
         # Optional failure detection for eval pipelines
         self.failure_detector = FailureModeDetector() if FailureModeDetector else None
+
+        # Optional EMA shadow model for more stable evaluation/checkpointing.
+        self.ema_model = None
+        if self.use_ema:
+            self.ema_model = copy.deepcopy(self.model).to(self.device)
+            self.ema_model.eval()
+            for param in self.ema_model.parameters():
+                param.requires_grad_(False)
 
     def _resolve_update_steps(
         self,
@@ -224,9 +239,12 @@ class Trainer:
                     optimizer=self.optimizer,
                     scheduler=self.scheduler,
                     scaler=self.scaler,
+                    ema_model=self.ema_model,
                     device=self.device,
                     sampler=self.train_loader.sampler if self.train_loader is not None else None,
                 )
+                if self.ema_model is not None and ckpt_info.get("ema_state_dict") is None:
+                    self.ema_model.load_state_dict(self.model.state_dict(), strict=False)
                 self.micro_step = int(ckpt_info.get("micro_step", ckpt_info.get("step", 0)))
                 self.optimizer_step = int(
                     ckpt_info.get("optimizer_step", max(getattr(self.scheduler, "last_epoch", 0), 0))
@@ -314,6 +332,13 @@ class Trainer:
                 # Scheduler step
                 self.scheduler.step()
                 self.optimizer_step += 1
+
+                if (
+                    self.ema_model is not None
+                    and self.optimizer_step % self.ema_update_every_updates == 0
+                ):
+                    self._update_ema()
+
                 progress.update(1)
                 micro_since_update = 0
 
@@ -363,22 +388,46 @@ class Trainer:
                 if self.val_loader and self.optimizer_step % self.eval_every_updates == 0:
                     val_metrics = self.evaluate()
                     self.metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+                    ema_val_metrics = {}
+                    if self.ema_model is not None and self.eval_with_ema:
+                        ema_val_metrics = self.evaluate(use_ema=True)
+                        self.metrics.update({f"val_ema_{k}": v for k, v in ema_val_metrics.items()})
                     if val_metrics:
                         val_loss = val_metrics.get("loss")
                         val_ppl = val_metrics.get("perplexity")
                         msg = f"Eval @ update {self.optimizer_step}: val_loss={val_loss:.4f}"
                         if val_ppl is not None:
                             msg += f", val_ppl={val_ppl:.2f}"
+                        if ema_val_metrics:
+                            ema_loss = ema_val_metrics.get("loss")
+                            ema_ppl = ema_val_metrics.get("perplexity")
+                            msg += f", val_ema_loss={ema_loss:.4f}"
+                            if ema_ppl is not None:
+                                msg += f", val_ema_ppl={ema_ppl:.2f}"
                         print(msg)
 
                     # Check for best model
-                    if val_metrics.get("loss", float("inf")) < self.best_val_loss:
-                        self.best_val_loss = val_metrics["loss"]
-                        self.metrics.is_best("val_loss", val_metrics["loss"], higher_is_better=False)
-                        if "perplexity" in val_metrics:
+                    monitor_metrics = (
+                        ema_val_metrics
+                        if (ema_val_metrics and self.eval_with_ema)
+                        else val_metrics
+                    )
+                    monitor_prefix = (
+                        "val_ema"
+                        if (ema_val_metrics and self.eval_with_ema)
+                        else "val"
+                    )
+                    if monitor_metrics.get("loss", float("inf")) < self.best_val_loss:
+                        self.best_val_loss = monitor_metrics["loss"]
+                        self.metrics.is_best(
+                            f"{monitor_prefix}_loss",
+                            monitor_metrics["loss"],
+                            higher_is_better=False,
+                        )
+                        if "perplexity" in monitor_metrics:
                             self.metrics.is_best(
-                                "val_perplexity",
-                                val_metrics["perplexity"],
+                                f"{monitor_prefix}_perplexity",
+                                monitor_metrics["perplexity"],
                                 higher_is_better=False,
                             )
                         self._save_checkpoint("checkpoint_best.pt")
@@ -767,13 +816,22 @@ class Trainer:
         return float(self.nar_conditioning_noise_prob * max(0.0, remaining))
 
     @torch.no_grad()
-    def evaluate(self) -> Dict[str, float]:
+    def evaluate(self, use_ema: bool = False) -> Dict[str, float]:
         """Run evaluation on validation set.
 
         Returns:
             Dictionary of evaluation metrics
         """
-        self.model.eval()
+        original_model = self.model
+        eval_model = self.model
+        swapped_model = False
+        if use_ema and self.ema_model is not None:
+            eval_model = self.ema_model
+            if eval_model is not self.model:
+                self.model = eval_model
+                swapped_model = True
+
+        eval_model.eval()
 
         total_loss = 0.0
         total_acc = 0.0
@@ -792,6 +850,8 @@ class Trainer:
             total_acc += metrics.get("accuracy", 0)
             n_batches += 1
 
+        if swapped_model:
+            self.model = original_model
         self.model.train()
 
         return {
@@ -817,11 +877,34 @@ class Trainer:
             config=self.config,
             path=str(self.checkpoint_dir / filename),
             scaler=self.scaler,
+            ema_state_dict=(
+                self.ema_model.state_dict()
+                if (self.ema_model is not None and self.save_ema_in_checkpoints)
+                else None
+            ),
             metrics=self.metrics.best_metrics,
             random_state=get_random_state(),
             sampler=self.train_loader.sampler if self.train_loader is not None else None,
             training_time=training_time,
         )
+
+    @torch.no_grad()
+    def _update_ema(self) -> None:
+        """Update EMA shadow model parameters."""
+        if self.ema_model is None:
+            return
+        decay = float(min(max(self.ema_decay, 0.0), 0.999999))
+        one_minus_decay = 1.0 - decay
+
+        ema_state = self.ema_model.state_dict()
+        model_state = self.model.state_dict()
+
+        for name, ema_value in ema_state.items():
+            model_value = model_state[name]
+            if not torch.is_floating_point(ema_value):
+                ema_value.copy_(model_value)
+                continue
+            ema_value.mul_(decay).add_(model_value.detach(), alpha=one_minus_decay)
 
     def _set_attention_logging(self, enabled: bool) -> None:
         """Toggle storing attention weights for diagnostics."""
@@ -879,6 +962,8 @@ class NARTrainer(Trainer):
             target_tokens=target_tokens,
             text_emb=text_emb,
             text_mask=text_mask,
+            speaker_tokens=batch.prompt_tokens,
+            speaker_lengths=batch.prompt_lengths,
             audio_lengths=batch.audio_lengths,
             label_smoothing=self.label_smoothing,
             entropy_weight=entropy_weight,

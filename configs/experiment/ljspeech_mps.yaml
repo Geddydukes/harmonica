@@ -81,6 +81,11 @@ training:
   token_noise_prob: 0.15
   token_noise_warmup_updates: 4000
   token_noise_warmup_steps: 20000
+  use_ema: true
+  ema_decay: 0.999
+  ema_update_every_updates: 1
+  eval_with_ema: true
+  save_ema_in_checkpoints: true
 
 codec:
   type: "encodec"

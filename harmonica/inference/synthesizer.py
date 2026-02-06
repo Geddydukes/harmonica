@@ -102,10 +102,29 @@ class Synthesizer:
 
         # Process reference for voice cloning
         prompt_tokens = None
+        nar_speaker_tokens = None
+        nar_speaker_lengths = None
         if reference_audio is not None:
-            prompt_tokens = self._process_reference(reference_audio, max_prompt_frames)
+            ref_tokens = self._encode_reference_tokens(reference_audio, max_prompt_frames)
+            prompt_tokens = ref_tokens[:, 0, :]
+            nar_speaker_tokens = ref_tokens
+            nar_speaker_lengths = torch.tensor(
+                [ref_tokens.shape[-1]] * ref_tokens.shape[0],
+                dtype=torch.long,
+                device=self.device,
+            )
         elif reference_tokens is not None:
-            prompt_tokens = reference_tokens[:, :max_prompt_frames].to(self.device)
+            if reference_tokens.dim() == 3:
+                ref_tokens = reference_tokens[:, :, :max_prompt_frames].to(self.device)
+                prompt_tokens = ref_tokens[:, 0, :]
+                nar_speaker_tokens = ref_tokens
+                nar_speaker_lengths = torch.tensor(
+                    [ref_tokens.shape[-1]] * ref_tokens.shape[0],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            else:
+                prompt_tokens = reference_tokens[:, :max_prompt_frames].to(self.device)
 
         # Generate codebook 1 tokens (AR)
         ar_tokens = self.ar_decoder.decode(
@@ -132,6 +151,8 @@ class Synthesizer:
                 ar_tokens=ar_tokens,
                 text_emb=text_emb,
                 text_mask=text_mask,
+                speaker_tokens=nar_speaker_tokens,
+                speaker_lengths=nar_speaker_lengths,
             )
         else:
             # AR-only mode (lower quality)
@@ -154,7 +175,7 @@ class Synthesizer:
         reference: Union[str, torch.Tensor],
         max_frames: int,
     ) -> torch.Tensor:
-        """Process reference audio for voice cloning.
+        """Process reference audio for AR prompting (first codebook only).
 
         Args:
             reference: Path to audio file or waveform tensor
@@ -162,6 +183,19 @@ class Synthesizer:
 
         Returns:
             Reference tokens [1, P] (first codebook only)
+        """
+        tokens = self._encode_reference_tokens(reference, max_frames)
+        return tokens[:, 0, :]
+
+    def _encode_reference_tokens(
+        self,
+        reference: Union[str, torch.Tensor],
+        max_frames: int,
+    ) -> torch.Tensor:
+        """Encode reference audio and return codec tokens.
+
+        Returns:
+            Reference tokens [1, K, P]
         """
         if isinstance(reference, str):
             # Load audio file
@@ -179,10 +213,8 @@ class Synthesizer:
         # Encode to tokens
         tokens = self.codec.encode(waveform)  # [1, K, S]
 
-        # Take first codebook and limit length
-        prompt_tokens = tokens[:, 0, :max_frames]  # [1, P]
-
-        return prompt_tokens
+        # Limit prompt length
+        return tokens[:, :, :max_frames]
 
     def synthesize_to_file(
         self,
@@ -217,15 +249,15 @@ class Synthesizer:
             List of waveforms
         """
         # Process reference once if provided
-        prompt_tokens = None
+        reference_tokens = None
         if reference_audio is not None:
-            prompt_tokens = self._process_reference(reference_audio, 225)
+            reference_tokens = self._encode_reference_tokens(reference_audio, 225)
 
         waveforms = []
         for text in texts:
             waveform = self.synthesize(
                 text,
-                reference_tokens=prompt_tokens,
+                reference_tokens=reference_tokens,
             )
             waveforms.append(waveform)
 

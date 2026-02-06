@@ -29,6 +29,9 @@ model:
     text_vocab_size: 128
     max_text_len: 256
     n_text_layers: 2
+    use_speaker_conditioning: true
+    speaker_n_codebooks: 8
+    speaker_pooling: "mean"
 
 data:
   dataset: "vctk"
@@ -36,6 +39,7 @@ data:
   cache_dir: "./cache/vctk"
   max_audio_len: 5.0
   min_audio_len: 1.0
+  prompt_frames: 225
   num_workers: 2
 
 training:
@@ -81,6 +85,11 @@ training:
   token_noise_warmup_updates: 3000
   token_noise_warmup_steps: 24000
   scheduler_type: "constant_warmup"
+  use_ema: true
+  ema_decay: 0.999
+  ema_update_every_updates: 1
+  eval_with_ema: true
+  save_ema_in_checkpoints: true
 
 codec:
   type: "encodec"

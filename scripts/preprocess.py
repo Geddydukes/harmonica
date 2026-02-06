@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 import json
+import yaml
 
 import torch
 from tqdm import tqdm
@@ -15,9 +16,53 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from harmonica.codec import EnCodecBackend
+from harmonica.config import (
+    compute_cache_fingerprint,
+    validate_config,
+)
 from harmonica.data import LJSpeechDataset, VCTKDataset, LibriTTSDataset
 from harmonica.utils.audio import AudioPreprocessor, load_audio_file
 from harmonica.utils.device import get_device
+
+
+def load_config(path: str) -> dict:
+    """Load YAML config file."""
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def merge_configs(base: dict, override: dict) -> dict:
+    """Merge two config dictionaries."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = merge_configs(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def build_fingerprint_from_args(args: argparse.Namespace, codec: EnCodecBackend) -> dict:
+    """Build fallback cache fingerprint when a full config is unavailable."""
+    return {
+        "version": 1,
+        "codec": {
+            "type": "encodec",
+            "bandwidth": float(codec.bandwidth),
+            "sample_rate": int(codec.sample_rate),
+        },
+        "data": {
+            "dataset": args.dataset,
+            "min_audio_len": float(args.min_duration),
+            "max_audio_len": float(args.max_duration),
+        },
+        "model": {
+            "ar_max_seq_len": 0,
+            "nar_max_seq_len": 0,
+            "ar_vocab_size": int(codec.codebook_size),
+            "nar_vocab_size": int(codec.codebook_size),
+        },
+    }
 
 
 def preprocess_dataset(
@@ -26,6 +71,7 @@ def preprocess_dataset(
     device: torch.device,
     output_dir: Path,
     batch_size: int = 16,
+    cache_fingerprint: Optional[dict] = None,
 ) -> None:
     """Preprocess dataset by encoding audio to codec tokens.
 
@@ -51,6 +97,7 @@ def preprocess_dataset(
             "min_duration": dataset.min_duration,
             "max_duration": dataset.max_duration,
         },
+        "fingerprint": cache_fingerprint,
     }
 
     print(f"Preprocessing {len(dataset)} samples...")
@@ -131,6 +178,7 @@ def preprocess_dataset(
     json_metadata = {
         "n_samples": len(metadata["samples"]),
         "codec": metadata["codec"],
+        "fingerprint": metadata.get("fingerprint"),
     }
     with open(output_dir / "metadata.json", "w") as f:
         json.dump(json_metadata, f, indent=2)
@@ -178,6 +226,12 @@ def main():
         default=0.5,
         help="Minimum audio duration in seconds",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional training config for deterministic cache fingerprinting",
+    )
 
     args = parser.parse_args()
 
@@ -187,6 +241,17 @@ def main():
 
     # Setup codec
     codec = EnCodecBackend(bandwidth=6.0, device=device)
+
+    # Build fingerprint from config (preferred) or CLI args (fallback).
+    cache_fingerprint = None
+    if args.config:
+        base_cfg = load_config("configs/config.yaml")
+        exp_cfg = load_config(args.config)
+        merged_cfg = merge_configs(base_cfg, exp_cfg)
+        validate_config(merged_cfg, strict=False, context="train")
+        cache_fingerprint = compute_cache_fingerprint(merged_cfg)
+    else:
+        cache_fingerprint = build_fingerprint_from_args(args, codec)
 
     # Load dataset
     data_dir = Path(args.data_dir)
@@ -215,7 +280,13 @@ def main():
     output_dir = Path(args.output_dir) if args.output_dir else Path(f"./cache/{args.dataset}")
 
     # Preprocess
-    preprocess_dataset(dataset, codec, device, output_dir)
+    preprocess_dataset(
+        dataset,
+        codec,
+        device,
+        output_dir,
+        cache_fingerprint=cache_fingerprint,
+    )
 
 
 if __name__ == "__main__":

@@ -62,9 +62,13 @@ class ARTransformer(nn.Module):
         super().__init__()
         self.length_control_mode = length_control_mode
         self.length_prompt_max = length_prompt_max
+        self.max_seq_len = max_seq_len
+        self.max_text_len = max_text_len
+        self.text_vocab_size = text_vocab_size
 
         # Optional stop token expands vocabulary by 1
         self.stop_token_id = None
+        self.codec_vocab_size = vocab_size
         self.vocab_size = vocab_size
         if self.length_control_mode == "stop_token":
             self.stop_token_id = vocab_size
@@ -502,3 +506,18 @@ class ARTransformer(nn.Module):
         }
 
         return loss, metrics
+
+    def get_interface_contract(self) -> dict:
+        """Return checkpoint interface contract for AR/NAR compatibility checks."""
+        return {
+            "contract_version": 1,
+            "model_type": "ar",
+            "d_model": int(self.d_model),
+            "vocab_size": int(self.codec_vocab_size),
+            "text_vocab_size": int(self.text_vocab_size),
+            "max_text_len": int(self.max_text_len),
+            "max_seq_len": int(self.max_seq_len),
+            "n_codebooks": 1,
+            "length_control_mode": self.length_control_mode,
+            "stop_token_enabled": self.stop_token_id is not None,
+        }

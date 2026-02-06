@@ -23,6 +23,7 @@ def save_checkpoint(
     optimizer_step: Optional[int] = None,
     micro_step: Optional[int] = None,
     scaler: Optional[Any] = None,
+    ema_state_dict: Optional[dict] = None,
     metrics: Optional[dict] = None,
     random_state: Optional[dict] = None,
     sampler: Optional[Any] = None,
@@ -57,6 +58,9 @@ def save_checkpoint(
         "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
         "config": config,
         "metrics": metrics or {},
+        "interface_contract": (
+            model.get_interface_contract() if hasattr(model, "get_interface_contract") else None
+        ),
         # Reproducibility
         "rng_state": torch.get_rng_state(),
         "numpy_rng_state": np.random.get_state(),
@@ -75,6 +79,8 @@ def save_checkpoint(
 
     if scaler is not None:
         checkpoint["scaler_state_dict"] = scaler.state_dict()
+    if ema_state_dict is not None:
+        checkpoint["ema_state_dict"] = ema_state_dict
 
     if random_state is not None:
         checkpoint["random_state"] = random_state
@@ -94,6 +100,7 @@ def save_checkpoint(
                 "micro_step": micro_step if micro_step is not None else step,
                 "config": config,
                 "metrics": metrics or {},
+                "interface_contract": checkpoint.get("interface_contract"),
                 "training_time": training_time,
                 "device": checkpoint.get("device"),
                 "timestamp": checkpoint.get("timestamp"),
@@ -109,6 +116,7 @@ def load_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
     scaler: Optional[Any] = None,
+    ema_model: Optional[nn.Module] = None,
     sampler: Optional[Any] = None,
     device: Optional[torch.device] = None,
     strict: bool = True,
@@ -168,6 +176,10 @@ def load_checkpoint(
     if scaler is not None and "scaler_state_dict" in checkpoint:
         scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
+    # Load EMA model state
+    if ema_model is not None and "ema_state_dict" in checkpoint:
+        ema_model.load_state_dict(checkpoint["ema_state_dict"], strict=False)
+
     # Restore sampler state if available
     if sampler is not None and checkpoint.get("sampler_state"):
         if hasattr(sampler, "load_state_dict"):
@@ -189,6 +201,8 @@ def load_checkpoint(
         "micro_step": checkpoint.get("micro_step", checkpoint.get("step", 0)),
         "config": checkpoint.get("config", {}),
         "metrics": checkpoint.get("metrics", {}),
+        "interface_contract": checkpoint.get("interface_contract"),
+        "ema_state_dict": checkpoint.get("ema_state_dict"),
         "random_state": checkpoint.get("random_state"),
         "training_time": checkpoint.get("training_time"),
     }

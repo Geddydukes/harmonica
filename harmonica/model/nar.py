@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .embedding import TokenEmbedding, SinusoidalPositionalEncoding
 from .blocks import CrossAttentionBlock
 from .text_encoder import TextEncoder
+from .speaker import SpeakerEncoder
 
 
 class NARTransformer(nn.Module):
@@ -38,6 +39,9 @@ class NARTransformer(nn.Module):
         max_text_len: int = 512,
         text_padding_idx: int = 0,
         n_text_layers: int = 4,
+        use_speaker_conditioning: bool = False,
+        speaker_n_codebooks: int = 8,
+        speaker_pooling: str = "mean",
     ):
         """Initialize NAR Transformer.
 
@@ -54,11 +58,18 @@ class NARTransformer(nn.Module):
             max_text_len: Maximum text sequence length
             text_padding_idx: Text padding token index
             n_text_layers: Number of text encoder layers
+            use_speaker_conditioning: Enable speaker conditioning from reference tokens
+            speaker_n_codebooks: Number of codebooks in speaker prompt tokens
+            speaker_pooling: Speaker encoder pooling mode
         """
         super().__init__()
         self.n_codebooks = n_codebooks
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self.max_seq_len = max_seq_len
+        self.max_text_len = max_text_len
+        self.text_vocab_size = text_vocab_size
+        self.use_speaker_conditioning = use_speaker_conditioning
         self._last_pred_tokens = None
         self._last_target_tokens = None
 
@@ -73,6 +84,15 @@ class NARTransformer(nn.Module):
             max_len=max_text_len,
             padding_idx=text_padding_idx,
         )
+
+        self.speaker_encoder = None
+        if self.use_speaker_conditioning:
+            self.speaker_encoder = SpeakerEncoder(
+                vocab_size=vocab_size,
+                d_model=d_model,
+                n_codebooks=speaker_n_codebooks,
+                pooling=speaker_pooling,
+            )
 
         # Embedding for first codebook (input from AR)
         self.ar_embedding = TokenEmbedding(vocab_size, d_model)
@@ -125,6 +145,7 @@ class NARTransformer(nn.Module):
         target_tokens: torch.Tensor,
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor] = None,
+        speaker_emb: Optional[torch.Tensor] = None,
         codebook_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """Forward pass for training.
@@ -151,14 +172,14 @@ class NARTransformer(nn.Module):
 
         if codebook_idx is not None:
             return self._forward_single_codebook(
-                ar_tokens, target_tokens, text_emb, text_mask, codebook_idx
+                ar_tokens, target_tokens, text_emb, text_mask, codebook_idx, speaker_emb
             )
 
         # Predict all codebooks
         all_logits = []
         for k in range(self.n_codebooks):
             logits = self._forward_single_codebook(
-                ar_tokens, target_tokens, text_emb, text_mask, k
+                ar_tokens, target_tokens, text_emb, text_mask, k, speaker_emb
             )
             all_logits.append(logits)
 
@@ -171,6 +192,7 @@ class NARTransformer(nn.Module):
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor],
         codebook_idx: int,
+        speaker_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass for a single codebook.
 
@@ -185,6 +207,21 @@ class NARTransformer(nn.Module):
             Logits [B, L, vocab_size]
         """
         B, L = ar_tokens.shape
+
+        context = text_emb
+        context_mask = text_mask
+        if speaker_emb is not None:
+            speaker_ctx = speaker_emb.unsqueeze(1)  # [B, 1, D]
+            context = torch.cat([speaker_ctx, text_emb], dim=1)
+            if text_mask is not None:
+                spk_mask = torch.zeros(
+                    (B, 1),
+                    dtype=text_mask.dtype,
+                    device=text_mask.device,
+                )
+                context_mask = torch.cat([spk_mask, text_mask], dim=1)
+            else:
+                context_mask = None
 
         # Start with AR embedding (codebook 1)
         x = self.ar_embedding(ar_tokens)  # [B, L, D]
@@ -207,8 +244,8 @@ class NARTransformer(nn.Module):
         for layer in self.layers:
             x = layer(
                 x,
-                context=text_emb,
-                cross_key_padding_mask=text_mask,
+                context=context,
+                cross_key_padding_mask=context_mask,
                 is_causal=False,  # NAR is bidirectional
             )
 
@@ -227,6 +264,9 @@ class NARTransformer(nn.Module):
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor] = None,
         temperature: float = 1.0,
+        speaker_tokens: Optional[torch.Tensor] = None,
+        speaker_lengths: Optional[torch.Tensor] = None,
+        speaker_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Generate codebooks 2-8 given codebook 1.
 
@@ -235,12 +275,18 @@ class NARTransformer(nn.Module):
             text_emb: Text embeddings [B, T, D]
             text_mask: Text padding mask [B, T]
             temperature: Sampling temperature (0 = greedy)
+            speaker_tokens: Optional reference codec tokens [B, K, L]
+            speaker_lengths: Optional reference lengths [B]
+            speaker_emb: Optional pre-computed speaker embeddings [B, D]
 
         Returns:
             All codebook tokens [B, K+1, L] (including codebook 1)
         """
         B, L = ar_tokens.shape
         device = ar_tokens.device
+
+        if speaker_emb is None:
+            speaker_emb = self._encode_speaker(speaker_tokens, speaker_lengths)
 
         # Start with AR tokens
         all_tokens = [ar_tokens]
@@ -251,7 +297,7 @@ class NARTransformer(nn.Module):
         for k in range(self.n_codebooks):
             # Forward for this codebook
             logits = self._forward_single_codebook(
-                ar_tokens, generated, text_emb, text_mask, k
+                ar_tokens, generated, text_emb, text_mask, k, speaker_emb
             )
 
             # Sample or take argmax
@@ -276,6 +322,8 @@ class NARTransformer(nn.Module):
         target_tokens: torch.Tensor,
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor] = None,
+        speaker_tokens: Optional[torch.Tensor] = None,
+        speaker_lengths: Optional[torch.Tensor] = None,
         audio_lengths: Optional[torch.Tensor] = None,
         label_smoothing: float = 0.0,
         entropy_weight: float = 0.0,
@@ -290,6 +338,8 @@ class NARTransformer(nn.Module):
             target_tokens: Target tokens for codebooks 2-8 [B, K, L]
             text_emb: Text embeddings [B, T, D]
             text_mask: Text padding mask [B, T]
+            speaker_tokens: Optional speaker reference tokens [B, K, L]
+            speaker_lengths: Optional speaker reference lengths [B]
             audio_lengths: Actual audio lengths [B]
             label_smoothing: Label smoothing factor
             entropy_weight: Optional entropy regularization weight
@@ -304,6 +354,7 @@ class NARTransformer(nn.Module):
         tf_ratio = float(max(0.0, min(1.0, teacher_forcing_ratio)))
         cond_noise_prob = float(max(0.0, min(1.0, conditioning_noise_prob)))
         device = target_tokens.device
+        speaker_emb = self._encode_speaker(speaker_tokens, speaker_lengths)
 
         # Decode codebooks sequentially so conditioning can use scheduled sampling.
         conditioning_tokens = torch.zeros_like(target_tokens)
@@ -319,6 +370,7 @@ class NARTransformer(nn.Module):
                 text_emb=text_emb,
                 text_mask=text_mask,
                 codebook_idx=k,
+                speaker_emb=speaker_emb,
             )  # [B, L, V]
             logits_per_codebook.append(k_logits)
 
@@ -473,7 +525,43 @@ class NARTransformer(nn.Module):
         metrics["nar_conditioning_noise_prob"] = cond_noise_prob
         metrics["pred_usage_entropy"] = pred_usage_entropy.item()
         metrics["target_usage_entropy"] = target_usage_entropy.item()
+        metrics["nar_speaker_conditioning"] = 1.0 if speaker_emb is not None else 0.0
         for k, k_loss in enumerate(codebook_losses):
             metrics[f"loss_codebook_{k+2}"] = k_loss.item()
 
         return loss, metrics
+
+    def get_interface_contract(self) -> dict:
+        """Return checkpoint interface contract for AR/NAR compatibility checks."""
+        return {
+            "contract_version": 1,
+            "model_type": "nar",
+            "d_model": int(self.d_model),
+            "vocab_size": int(self.vocab_size),
+            "text_vocab_size": int(self.text_vocab_size),
+            "max_text_len": int(self.max_text_len),
+            "max_seq_len": int(self.max_seq_len),
+            "n_codebooks": int(self.n_codebooks),
+            "total_codebooks": int(self.n_codebooks + 1),
+            "use_speaker_conditioning": bool(self.use_speaker_conditioning),
+        }
+
+    def _encode_speaker(
+        self,
+        speaker_tokens: Optional[torch.Tensor],
+        speaker_lengths: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Encode speaker reference tokens if speaker conditioning is enabled."""
+        if not self.use_speaker_conditioning or self.speaker_encoder is None:
+            return None
+        if speaker_tokens is None:
+            return None
+
+        ref_mask = None
+        if speaker_lengths is not None:
+            max_len = speaker_tokens.shape[-1]
+            ref_mask = (
+                torch.arange(max_len, device=speaker_tokens.device).unsqueeze(0)
+                < speaker_lengths.unsqueeze(1)
+            )
+        return self.speaker_encoder(speaker_tokens, ref_mask=ref_mask)

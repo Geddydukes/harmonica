@@ -591,3 +591,53 @@ def test_nar_trainer_passes_scheduled_teacher_forcing_ratio():
 
     assert "nar_teacher_forcing_ratio" in metrics
     assert metrics["nar_teacher_forcing_ratio"] == pytest.approx(0.5, abs=1e-5)
+
+
+def test_trainer_saves_and_loads_ema_checkpoint(tmp_path):
+    class ConstantLossTrainer(Trainer):
+        def _compute_loss(self, batch):  # type: ignore[override]
+            param = next(self.model.parameters())
+            loss = (param ** 2).mean()
+            return loss, {"accuracy": 0.0, "perplexity": torch.exp(loss.detach()).item()}
+
+    model = torch.nn.Linear(2, 2)
+    loader = torch.utils.data.DataLoader(
+        DummyBatchDataset(),
+        batch_size=1,
+        shuffle=False,
+        collate_fn=lambda batch: batch[0],
+    )
+    config = {
+        "training": {
+            "grad_accum_steps": 1,
+            "max_update_steps": 1,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 100,
+            "checkpoint_every_updates": 100,
+            "mixed_precision": False,
+            "use_ema": True,
+            "ema_decay": 0.9,
+            "ema_update_every_updates": 1,
+            "save_ema_in_checkpoints": True,
+        },
+        "experiment": {
+            "log_dir": str(tmp_path / "logs"),
+            "checkpoint_dir": str(tmp_path / "ckpts"),
+        },
+        "device": {"prefer": "cpu"},
+    }
+
+    trainer = ConstantLossTrainer(
+        model=model,
+        config=config,
+        train_loader=loader,
+        device=torch.device("cpu"),
+    )
+    trainer.train(resume=False)
+    ckpt_path = tmp_path / "ckpts" / "checkpoint_1.pt"
+
+    assert ckpt_path.exists()
+
+    loaded = load_checkpoint(str(ckpt_path), device=torch.device("cpu"))
+    assert loaded.get("ema_state_dict") is not None

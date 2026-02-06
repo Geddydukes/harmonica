@@ -31,6 +31,8 @@ class NARDecoder:
         ar_tokens: torch.Tensor,
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor] = None,
+        speaker_tokens: Optional[torch.Tensor] = None,
+        speaker_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Generate codebooks 2-8 given codebook 1.
 
@@ -38,6 +40,8 @@ class NARDecoder:
             ar_tokens: Codebook 1 tokens from AR model [B, L]
             text_emb: Text embeddings [B, T, D]
             text_mask: Text padding mask [B, T]
+            speaker_tokens: Optional speaker reference tokens [B, K, L]
+            speaker_lengths: Optional speaker reference lengths [B]
 
         Returns:
             All codebook tokens [B, K, L]
@@ -47,13 +51,19 @@ class NARDecoder:
         # Use per-codebook temperatures if provided
         if self.temperatures_per_codebook:
             return self._decode_with_per_codebook_temp(
-                ar_tokens, text_emb, text_mask
+                ar_tokens,
+                text_emb,
+                text_mask,
+                speaker_tokens=speaker_tokens,
+                speaker_lengths=speaker_lengths,
             )
 
         return self.model.generate(
             ar_tokens=ar_tokens,
             text_emb=text_emb,
             text_mask=text_mask,
+            speaker_tokens=speaker_tokens,
+            speaker_lengths=speaker_lengths,
             temperature=temp,
         )
 
@@ -63,6 +73,8 @@ class NARDecoder:
         ar_tokens: torch.Tensor,
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor],
+        speaker_tokens: Optional[torch.Tensor] = None,
+        speaker_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Generate with different temperature per codebook.
 
@@ -76,6 +88,9 @@ class NARDecoder:
         """
         B, L = ar_tokens.shape
         device = ar_tokens.device
+        speaker_emb = None
+        if hasattr(self.model, "_encode_speaker"):
+            speaker_emb = self.model._encode_speaker(speaker_tokens, speaker_lengths)
 
         # Start with AR tokens
         all_tokens = [ar_tokens]
@@ -91,7 +106,12 @@ class NARDecoder:
 
             # Forward for this codebook
             logits = self.model._forward_single_codebook(
-                ar_tokens, generated, text_emb, text_mask, k
+                ar_tokens,
+                generated,
+                text_emb,
+                text_mask,
+                k,
+                speaker_emb=speaker_emb,
             )
 
             # Sample
@@ -115,6 +135,8 @@ class NARDecoder:
         text_emb: torch.Tensor,
         text_mask: Optional[torch.Tensor] = None,
         n_iterations: int = 1,
+        speaker_tokens: Optional[torch.Tensor] = None,
+        speaker_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Iterative refinement decoding.
 
@@ -126,6 +148,8 @@ class NARDecoder:
             text_emb: Text embeddings [B, T, D]
             text_mask: Text padding mask [B, T]
             n_iterations: Number of refinement iterations
+            speaker_tokens: Optional speaker reference tokens [B, K, L]
+            speaker_lengths: Optional speaker reference lengths [B]
 
         Returns:
             All codebook tokens [B, K, L]
@@ -136,7 +160,13 @@ class NARDecoder:
             text_emb=text_emb,
             text_mask=text_mask,
             temperature=self.temperature,
+            speaker_tokens=speaker_tokens,
+            speaker_lengths=speaker_lengths,
         )
+
+        speaker_emb = None
+        if hasattr(self.model, "_encode_speaker"):
+            speaker_emb = self.model._encode_speaker(speaker_tokens, speaker_lengths)
 
         # Refinement iterations
         for _ in range(n_iterations - 1):
@@ -145,7 +175,12 @@ class NARDecoder:
 
             for k in range(self.model.n_codebooks):
                 logits = self.model._forward_single_codebook(
-                    ar_tokens, generated, text_emb, text_mask, k
+                    ar_tokens,
+                    generated,
+                    text_emb,
+                    text_mask,
+                    k,
+                    speaker_emb=speaker_emb,
                 )
 
                 if self.temperature > 0:
