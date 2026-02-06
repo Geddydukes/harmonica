@@ -117,9 +117,15 @@ class Synthesizer:
         # Generate codebooks 2-8 (NAR)
         if self.nar_decoder is not None:
             # Get text embeddings for NAR
-            text_emb, text_mask = self.ar_model.text_encoder(
-                text_tokens, text_lengths
-            )
+            if hasattr(self.nar_model, "encode_text"):
+                text_emb, text_mask = self.nar_model.encode_text(
+                    text_tokens, text_lengths
+                )
+            else:
+                # Backward-compatible fallback for older NAR implementations.
+                text_emb, text_mask = self.ar_model.text_encoder(
+                    text_tokens, text_lengths
+                )
 
             # Generate remaining codebooks
             all_tokens = self.nar_decoder.decode(

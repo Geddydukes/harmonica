@@ -6,8 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .embedding import TokenEmbedding, SinusoidalPositionalEncoding, CodebookEmbedding
+from .embedding import TokenEmbedding, SinusoidalPositionalEncoding
 from .blocks import CrossAttentionBlock
+from .text_encoder import TextEncoder
 
 
 class NARTransformer(nn.Module):
@@ -33,6 +34,10 @@ class NARTransformer(nn.Module):
         d_ff: int = 2048,
         dropout: float = 0.1,
         max_seq_len: int = 2048,
+        text_vocab_size: int = 128,
+        max_text_len: int = 512,
+        text_padding_idx: int = 0,
+        n_text_layers: int = 4,
     ):
         """Initialize NAR Transformer.
 
@@ -45,11 +50,29 @@ class NARTransformer(nn.Module):
             d_ff: Feed-forward dimension
             dropout: Dropout probability
             max_seq_len: Maximum sequence length
+            text_vocab_size: Text vocabulary size
+            max_text_len: Maximum text sequence length
+            text_padding_idx: Text padding token index
+            n_text_layers: Number of text encoder layers
         """
         super().__init__()
         self.n_codebooks = n_codebooks
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self._last_pred_tokens = None
+        self._last_target_tokens = None
+
+        # Text encoder for NAR conditioning.
+        self.text_encoder = TextEncoder(
+            vocab_size=text_vocab_size,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_text_layers,
+            d_ff=d_ff,
+            dropout=dropout,
+            max_len=max_text_len,
+            padding_idx=text_padding_idx,
+        )
 
         # Embedding for first codebook (input from AR)
         self.ar_embedding = TokenEmbedding(vocab_size, d_model)
@@ -88,6 +111,14 @@ class NARTransformer(nn.Module):
             nn.init.zeros_(proj.bias)
             nn.init.normal_(proj.weight, std=d_model**-0.5)
 
+    def encode_text(
+        self,
+        text_tokens: torch.Tensor,
+        text_lengths: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode text tokens for NAR conditioning."""
+        return self.text_encoder(text_tokens, text_lengths)
+
     def forward(
         self,
         ar_tokens: torch.Tensor,
@@ -112,6 +143,11 @@ class NARTransformer(nn.Module):
             Logits [B, K, L, vocab_size] or [B, L, vocab_size] if codebook_idx given
         """
         B, L = ar_tokens.shape
+        if text_emb.shape[-1] != self.d_model:
+            raise ValueError(
+                f"NAR text embedding dim mismatch: got {text_emb.shape[-1]}, "
+                f"expected {self.d_model}."
+            )
 
         if codebook_idx is not None:
             return self._forward_single_codebook(
@@ -242,6 +278,10 @@ class NARTransformer(nn.Module):
         text_mask: Optional[torch.Tensor] = None,
         audio_lengths: Optional[torch.Tensor] = None,
         label_smoothing: float = 0.0,
+        entropy_weight: float = 0.0,
+        usage_entropy_weight: float = 0.0,
+        teacher_forcing_ratio: float = 1.0,
+        conditioning_noise_prob: float = 0.0,
     ) -> Tuple[torch.Tensor, dict]:
         """Compute cross-entropy loss for all codebooks.
 
@@ -252,25 +292,41 @@ class NARTransformer(nn.Module):
             text_mask: Text padding mask [B, T]
             audio_lengths: Actual audio lengths [B]
             label_smoothing: Label smoothing factor
+            entropy_weight: Optional entropy regularization weight
+            usage_entropy_weight: Optional marginal-usage entropy regularization
+            teacher_forcing_ratio: Probability of using ground-truth previous codebooks
+            conditioning_noise_prob: Random replacement prob for conditioning tokens
 
         Returns:
             Tuple of (loss, metrics dict)
         """
         B, K, L = target_tokens.shape
+        tf_ratio = float(max(0.0, min(1.0, teacher_forcing_ratio)))
+        cond_noise_prob = float(max(0.0, min(1.0, conditioning_noise_prob)))
+        device = target_tokens.device
 
-        # Forward pass for all codebooks
-        logits = self.forward(ar_tokens, target_tokens, text_emb, text_mask)
-
-        # Compute loss for each codebook
+        # Decode codebooks sequentially so conditioning can use scheduled sampling.
+        conditioning_tokens = torch.zeros_like(target_tokens)
+        logits_per_codebook = []
+        preds_per_codebook = []
         total_loss = 0.0
         codebook_losses = []
 
         for k in range(K):
-            k_logits = logits[:, k, :, :].reshape(-1, self.vocab_size)
+            k_logits = self._forward_single_codebook(
+                ar_tokens=ar_tokens,
+                target_tokens=conditioning_tokens,
+                text_emb=text_emb,
+                text_mask=text_mask,
+                codebook_idx=k,
+            )  # [B, L, V]
+            logits_per_codebook.append(k_logits)
+
+            k_logits_flat = k_logits.reshape(-1, self.vocab_size)
             k_targets = target_tokens[:, k, :].reshape(-1)
 
             k_loss = F.cross_entropy(
-                k_logits, k_targets,
+                k_logits_flat, k_targets,
                 label_smoothing=label_smoothing,
                 reduction="none"
             ).reshape(B, L)
@@ -285,19 +341,138 @@ class NARTransformer(nn.Module):
             codebook_losses.append(k_loss)
             total_loss = total_loss + k_loss
 
+            with torch.no_grad():
+                k_preds = k_logits.argmax(dim=-1)
+                preds_per_codebook.append(k_preds)
+                if tf_ratio >= 1.0:
+                    next_cond = target_tokens[:, k, :]
+                elif tf_ratio <= 0.0:
+                    next_cond = k_preds
+                else:
+                    gt_mask = torch.rand(B, L, device=device) < tf_ratio
+                    next_cond = torch.where(gt_mask, target_tokens[:, k, :], k_preds)
+
+                if cond_noise_prob > 0:
+                    if audio_lengths is not None:
+                        valid = (
+                            torch.arange(L, device=device).unsqueeze(0)
+                            < audio_lengths.unsqueeze(1)
+                        )
+                    else:
+                        valid = torch.ones((B, L), device=device, dtype=torch.bool)
+                    noise_mask = (torch.rand(B, L, device=device) < cond_noise_prob) & valid
+                    if noise_mask.any():
+                        rand_tokens = torch.randint(
+                            low=0,
+                            high=self.vocab_size,
+                            size=(B, L),
+                            device=device,
+                            dtype=next_cond.dtype,
+                        )
+                        next_cond = torch.where(noise_mask, rand_tokens, next_cond)
+                # Important: avoid in-place mutation on a tensor that was read
+                # in the current forward graph; embedding backward on MPS tracks
+                # index tensor versions and will error if they change in-place.
+                updated_conditioning = conditioning_tokens.clone()
+                updated_conditioning[:, k, :] = next_cond
+                conditioning_tokens = updated_conditioning
+
+        logits = torch.stack(logits_per_codebook, dim=1)  # [B, K, L, V]
+        preds = torch.stack(preds_per_codebook, dim=1)  # [B, K, L]
+
         # Average across codebooks
         loss = total_loss / K
 
+        entropy_loss = None
+        if entropy_weight > 0:
+            probs = torch.softmax(logits.float(), dim=-1)  # [B, K, L, V]
+            entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1)  # [B, K, L]
+            if audio_lengths is not None:
+                mask = (
+                    torch.arange(L, device=ar_tokens.device).unsqueeze(0)
+                    < audio_lengths.unsqueeze(1)
+                )  # [B, L]
+                mask = mask.unsqueeze(1).expand(B, K, L)
+                entropy = (entropy * mask.float()).sum() / mask.float().sum()
+            else:
+                entropy = entropy.mean()
+            entropy_loss = entropy_weight * (-entropy)
+            loss = loss + entropy_loss
+
+        usage_entropy_loss = None
+        if usage_entropy_weight > 0:
+            probs = torch.softmax(logits.float(), dim=-1)  # [B, K, L, V]
+            if audio_lengths is not None:
+                mask = (
+                    torch.arange(L, device=ar_tokens.device).unsqueeze(0)
+                    < audio_lengths.unsqueeze(1)
+                )  # [B, L]
+                mask = mask.unsqueeze(1).unsqueeze(-1).float()  # [B, 1, L, 1]
+                denom = mask.sum(dim=(0, 2)).clamp_min(1.0)  # [1, 1]
+                marginal = (probs * mask).sum(dim=(0, 2)) / denom  # [K, V]
+            else:
+                marginal = probs.mean(dim=(0, 2))  # [K, V]
+
+            usage_entropy = -(marginal * torch.log(marginal + 1e-8)).sum(dim=-1).mean()
+            usage_entropy_loss = usage_entropy_weight * (-usage_entropy)
+            loss = loss + usage_entropy_loss
+
         # Compute metrics
         with torch.no_grad():
-            preds = logits.argmax(dim=-1)  # [B, K, L]
+            self._last_pred_tokens = preds.detach()
+            self._last_target_tokens = target_tokens.detach()
             accuracy = (preds == target_tokens).float().mean()
             perplexity = torch.exp(loss.detach())
+
+            # Marginal usage entropy diagnostics (pred vs target), averaged over codebooks.
+            pred_usage_entropies = []
+            target_usage_entropies = []
+            for k in range(K):
+                pred_k = preds[:, k, :]
+                tgt_k = target_tokens[:, k, :]
+                if audio_lengths is not None:
+                    valid = (
+                        torch.arange(L, device=device).unsqueeze(0)
+                        < audio_lengths.unsqueeze(1)
+                    )
+                    pred_k = pred_k[valid]
+                    tgt_k = tgt_k[valid]
+                else:
+                    pred_k = pred_k.reshape(-1)
+                    tgt_k = tgt_k.reshape(-1)
+                if pred_k.numel() == 0:
+                    continue
+                pred_hist = torch.bincount(pred_k, minlength=self.vocab_size).float()
+                pred_probs = pred_hist / pred_hist.sum().clamp_min(1.0)
+                pred_h = -(pred_probs * torch.log(pred_probs + 1e-8)).sum()
+                pred_usage_entropies.append(pred_h)
+
+                tgt_hist = torch.bincount(tgt_k, minlength=self.vocab_size).float()
+                tgt_probs = tgt_hist / tgt_hist.sum().clamp_min(1.0)
+                tgt_h = -(tgt_probs * torch.log(tgt_probs + 1e-8)).sum()
+                target_usage_entropies.append(tgt_h)
+
+            if pred_usage_entropies:
+                pred_usage_entropy = torch.stack(pred_usage_entropies).mean()
+            else:
+                pred_usage_entropy = torch.tensor(0.0, device=device)
+            if target_usage_entropies:
+                target_usage_entropy = torch.stack(target_usage_entropies).mean()
+            else:
+                target_usage_entropy = torch.tensor(0.0, device=device)
 
         metrics = {
             "accuracy": accuracy.item(),
             "perplexity": perplexity.item(),
         }
+        if entropy_loss is not None:
+            metrics["codebook_entropy_loss"] = entropy_loss.item()
+        if usage_entropy_loss is not None:
+            metrics["codebook_usage_entropy_loss"] = usage_entropy_loss.item()
+        metrics["nar_teacher_forcing_ratio"] = tf_ratio
+        metrics["nar_conditioning_noise_prob"] = cond_noise_prob
+        metrics["pred_usage_entropy"] = pred_usage_entropy.item()
+        metrics["target_usage_entropy"] = target_usage_entropy.item()
         for k, k_loss in enumerate(codebook_losses):
             metrics[f"loss_codebook_{k+2}"] = k_loss.item()
 

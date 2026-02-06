@@ -2,9 +2,14 @@
 """Synthesize speech from text using trained models."""
 
 import argparse
+import sys
 from pathlib import Path
 
 import torch
+
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 from harmonica.codec import EnCodecBackend
 from harmonica.text import CharTokenizer
@@ -124,6 +129,13 @@ def main():
             n_layers=nar_config.get("n_layers", 8),
             d_ff=nar_config.get("d_ff", 2048),
             dropout=nar_config.get("dropout", 0.1),
+            max_seq_len=nar_config.get("max_seq_len", ar_config.get("max_seq_len", 2048)),
+            text_vocab_size=nar_config.get(
+                "text_vocab_size", ar_config.get("text_vocab_size", tokenizer.vocab_size)
+            ),
+            max_text_len=nar_config.get("max_text_len", ar_config.get("max_text_len", 512)),
+            text_padding_idx=nar_config.get("text_padding_idx", 0),
+            n_text_layers=nar_config.get("n_text_layers", 4),
         )
         load_checkpoint(args.nar_checkpoint, model=nar_model, device=device)
 

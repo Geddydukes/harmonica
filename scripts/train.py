@@ -77,6 +77,7 @@ def create_dataloaders(
     config: dict,
     tokenizer: CharTokenizer,
     codec: EnCodecBackend,
+    model_type: str = "ar",
 ) -> tuple[DataLoader, Optional[DataLoader]]:
     """Create data loader from config."""
     data_cfg = config.get("data", {})
@@ -235,7 +236,11 @@ def create_dataloaders(
     elif hasattr(dataset, "speaker_ids") and dataset.is_multi_speaker:
         speaker_to_idx = {sid: i for i, sid in enumerate(dataset.speaker_ids)}
 
-    max_seq_len = config.get("model", {}).get("ar", {}).get("max_seq_len")
+    model_cfg = config.get("model", {}).get(model_type, {})
+    max_seq_len = model_cfg.get("max_seq_len")
+    if max_seq_len is None and model_type != "ar":
+        # Backward-compatible fallback for old configs without model.nar.max_seq_len.
+        max_seq_len = config.get("model", {}).get("ar", {}).get("max_seq_len")
     if max_seq_len is not None:
         max_audio_len = max(1, int(max_seq_len) - 1)
     else:
@@ -356,6 +361,17 @@ def main():
         config["device"] = {"prefer": args.device}
     if args.seed:
         config["experiment"]["seed"] = args.seed
+    if args.model_type == "nar":
+        exp_cfg = config.setdefault("experiment", {})
+        ckpt_dir = Path(exp_cfg.get("checkpoint_dir", "./experiments/checkpoints"))
+        log_dir = Path(exp_cfg.get("log_dir", "./experiments/logs"))
+        if ckpt_dir.name != "nar":
+            ckpt_dir = ckpt_dir / "nar"
+        if log_dir.name != "nar":
+            log_dir = log_dir / "nar"
+        exp_cfg["checkpoint_dir"] = str(ckpt_dir)
+        exp_cfg["log_dir"] = str(log_dir)
+        print(f"NAR outputs: checkpoints={ckpt_dir}, logs={log_dir}")
 
     # Set seed
     seed = config.get("experiment", {}).get("seed", 42)
@@ -377,7 +393,12 @@ def main():
     tokenizer = CharTokenizer()
 
     # Create data loaders
-    train_loader, val_loader = create_dataloaders(config, tokenizer, codec)
+    train_loader, val_loader = create_dataloaders(
+        config,
+        tokenizer,
+        codec,
+        model_type=args.model_type,
+    )
     warn_cache_mismatch(config)
     try:
         print(f"Training samples: {len(train_loader.dataset)}")
@@ -386,9 +407,14 @@ def main():
 
     # Print key config
     train_cfg = config.get("training", {})
+    active_model_cfg = config.get("model", {}).get(args.model_type, {})
+    active_max_seq_len = active_model_cfg.get(
+        "max_seq_len",
+        config.get("model", {}).get("ar", {}).get("max_seq_len", "n/a"),
+    )
     print(
         "Config: "
-        f"max_seq_len={config.get('model', {}).get('ar', {}).get('max_seq_len', 'n/a')}, "
+        f"max_seq_len={active_max_seq_len}, "
         f"max_audio_len={config.get('data', {}).get('max_audio_len', 'n/a')}, "
         f"batch_size={train_cfg.get('batch_size', 'n/a')}, "
         f"grad_accum_steps={train_cfg.get('grad_accum_steps', 'n/a')}, "
@@ -417,6 +443,7 @@ def main():
         trainer_cls = Trainer
     else:
         model_cfg = config.get("model", {}).get("nar", {})
+        ar_model_cfg = config.get("model", {}).get("ar", {})
         model = NARTransformer(
             n_codebooks=model_cfg.get("n_codebooks", 7),
             vocab_size=model_cfg.get("vocab_size", 1024),
@@ -425,6 +452,13 @@ def main():
             n_layers=model_cfg.get("n_layers", 8),
             d_ff=model_cfg.get("d_ff", 2048),
             dropout=model_cfg.get("dropout", 0.1),
+            max_seq_len=model_cfg.get("max_seq_len", ar_model_cfg.get("max_seq_len", 2048)),
+            text_vocab_size=model_cfg.get(
+                "text_vocab_size", ar_model_cfg.get("text_vocab_size", tokenizer.vocab_size)
+            ),
+            max_text_len=model_cfg.get("max_text_len", ar_model_cfg.get("max_text_len", 512)),
+            text_padding_idx=model_cfg.get("text_padding_idx", 0),
+            n_text_layers=model_cfg.get("n_text_layers", 4),
         )
         trainer_cls = NARTrainer
 

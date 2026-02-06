@@ -170,6 +170,7 @@ class MetricsTracker:
     def log_codebook_utilization(
         self,
         predicted_tokens: torch.Tensor,
+        target_tokens: torch.Tensor | None,
         vocab_size: int,
         step: int,
         prefix: str = "train",
@@ -177,38 +178,128 @@ class MetricsTracker:
         audio_lengths: torch.Tensor | None = None,
         warn_after_step: int | None = None,
     ) -> None:
-        """Log codebook utilization and token histogram."""
+        """Log codebook utilization and token histogram.
+
+        Logs both absolute utilization (unique/vocab) and relative utilization
+        (unique/min(vocab, valid_tokens)), which is more stable when utterance
+        lengths vary.
+        """
         if self.writer is None:
             return
 
-        tokens = predicted_tokens
-        if audio_lengths is not None:
-            # Mask out padding positions based on true lengths
-            lengths = audio_lengths.to(tokens.device)
-            max_len = tokens.shape[1]
-            mask = torch.arange(max_len, device=tokens.device).unsqueeze(0) < lengths.unsqueeze(1)
-            tokens = tokens[mask]
-            if tokens.numel() == 0:
-                return
-        if pad_token_id is not None:
-            tokens = tokens[tokens != pad_token_id]
-            if tokens.numel() == 0:
-                return
+        def _filter_tokens(tokens: torch.Tensor | None) -> torch.Tensor | None:
+            if tokens is None:
+                return None
+            out = tokens
+            if audio_lengths is not None:
+                # Mask out padding positions based on true lengths
+                lengths = audio_lengths.to(out.device)
+                if out.dim() == 2:
+                    max_len = out.shape[1]
+                    mask = (
+                        torch.arange(max_len, device=out.device).unsqueeze(0)
+                        < lengths.unsqueeze(1)
+                    )
+                    out = out[mask]
+                elif out.dim() == 3:
+                    _, _, max_len = out.shape
+                    mask_2d = (
+                        torch.arange(max_len, device=out.device).unsqueeze(0)
+                        < lengths.unsqueeze(1)
+                    )
+                    mask = mask_2d.unsqueeze(1).expand_as(out)
+                    out = out[mask]
+                if out.numel() == 0:
+                    return None
+            if pad_token_id is not None:
+                out = out[out != pad_token_id]
+                if out.numel() == 0:
+                    return None
+            return out
 
-        unique_tokens = torch.unique(tokens).numel()
-        utilization = unique_tokens / max(vocab_size, 1)
+        def _utilization(tokens: torch.Tensor | None) -> tuple[float, float]:
+            if tokens is None:
+                return 0.0, 0.0
+            unique_tokens = torch.unique(tokens).numel()
+            abs_util = unique_tokens / max(vocab_size, 1)
+            rel_denom = max(1, min(vocab_size, int(tokens.numel())))
+            rel_util = unique_tokens / rel_denom
+            return float(abs_util), float(rel_util)
 
-        self.writer.add_scalar(f"{prefix}/codebook_utilization", utilization, step)
+        pred_tokens = _filter_tokens(predicted_tokens)
+        if pred_tokens is None:
+            return
+        tgt_tokens = _filter_tokens(target_tokens)
 
-        token_counts = torch.bincount(
-            tokens.flatten().cpu(), minlength=vocab_size
+        pred_abs, pred_rel = _utilization(pred_tokens)
+        tgt_abs, tgt_rel = _utilization(tgt_tokens)
+
+        # Backward-compatible metric name.
+        self.writer.add_scalar(f"{prefix}/codebook_utilization", pred_abs, step)
+        self.writer.add_scalar(f"{prefix}/codebook_utilization_abs_pred", pred_abs, step)
+        self.writer.add_scalar(f"{prefix}/codebook_utilization_rel_pred", pred_rel, step)
+        if tgt_tokens is not None:
+            self.writer.add_scalar(f"{prefix}/codebook_utilization_abs_target", tgt_abs, step)
+            self.writer.add_scalar(f"{prefix}/codebook_utilization_rel_target", tgt_rel, step)
+
+        token_counts = torch.bincount(pred_tokens.flatten().cpu(), minlength=vocab_size)
+        self.writer.add_histogram(f"{prefix}/token_distribution", token_counts, step)
+
+        should_warn = (
+            pred_tokens.numel() >= 64
+            and pred_rel < 0.30
+            and (warn_after_step is None or step >= warn_after_step)
         )
-        self.writer.add_histogram(
-            f"{prefix}/token_distribution", token_counts, step
-        )
+        if should_warn:
+            msg = (
+                "WARNING: Codebook collapse detected! "
+                f"pred_abs={pred_abs:.1%}, pred_rel={pred_rel:.1%}"
+            )
+            if tgt_tokens is not None:
+                msg += f", target_rel={tgt_rel:.1%}"
+            print(msg)
 
-        if utilization < 0.3 and (warn_after_step is None or step >= warn_after_step):
-            print(f"WARNING: Codebook collapse detected! Only {utilization:.1%} of vocab used")
+        # Per-codebook diagnostics for NAR-style [B, K, L] tokens.
+        if predicted_tokens.dim() == 3:
+            K = predicted_tokens.shape[1]
+            collapsed_codebooks = []
+            for k in range(K):
+                pred_k = _filter_tokens(predicted_tokens[:, k, :])
+                if pred_k is None:
+                    continue
+                tgt_k = None
+                if target_tokens is not None and target_tokens.dim() == 3:
+                    tgt_k = _filter_tokens(target_tokens[:, k, :])
+                pred_k_abs, pred_k_rel = _utilization(pred_k)
+                self.writer.add_scalar(
+                    f"{prefix}/codebook_{k+2}_utilization_abs_pred",
+                    pred_k_abs,
+                    step,
+                )
+                self.writer.add_scalar(
+                    f"{prefix}/codebook_{k+2}_utilization_rel_pred",
+                    pred_k_rel,
+                    step,
+                )
+                if tgt_k is not None:
+                    _, tgt_k_rel = _utilization(tgt_k)
+                    self.writer.add_scalar(
+                        f"{prefix}/codebook_{k+2}_utilization_rel_target",
+                        tgt_k_rel,
+                        step,
+                    )
+                if pred_k.numel() >= 64 and pred_k_rel < 0.30:
+                    collapsed_codebooks.append(k + 2)
+
+            if (
+                collapsed_codebooks
+                and (warn_after_step is None or step >= warn_after_step)
+            ):
+                joined = ",".join(str(k) for k in collapsed_codebooks)
+                print(
+                    "WARNING: Per-codebook collapse detected! "
+                    f"codebooks={joined}"
+                )
 
     def log_attention_entropy(
         self,

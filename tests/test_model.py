@@ -280,6 +280,24 @@ class TestNARTransformer:
         logits = model(ar_tokens, target_tokens, text_emb)
         assert logits.shape == (2, 7, 50, 1024)
 
+    def test_encode_text(self, model):
+        """Test NAR text encoder path."""
+        text_tokens = torch.randint(0, 128, (2, 30))
+        text_lengths = torch.tensor([30, 20])
+
+        text_emb, text_mask = model.encode_text(text_tokens, text_lengths)
+        assert text_emb.shape == (2, 30, 256)
+        assert text_mask.shape == (2, 30)
+
+    def test_forward_raises_on_text_dim_mismatch(self, model):
+        """Text embedding dimension should match NAR d_model."""
+        ar_tokens = torch.randint(0, 1024, (2, 50))
+        target_tokens = torch.randint(0, 1024, (2, 7, 50))
+        text_emb = torch.randn(2, 30, 128)
+
+        with pytest.raises(ValueError, match="text embedding dim mismatch"):
+            model(ar_tokens, target_tokens, text_emb)
+
     def test_generate(self, model):
         """Test NAR generation."""
         ar_tokens = torch.randint(0, 1024, (1, 50))
@@ -300,3 +318,44 @@ class TestNARTransformer:
 
         assert loss.dim() == 0
         assert "accuracy" in metrics
+
+    def test_compute_loss_with_scheduled_sampling_and_usage_entropy(self, model):
+        """Test NAR loss supports scheduled conditioning and usage entropy."""
+        ar_tokens = torch.randint(0, 1024, (2, 50))
+        target_tokens = torch.randint(0, 1024, (2, 7, 50))
+        text_emb = torch.randn(2, 30, 256)
+
+        loss, metrics = model.compute_loss(
+            ar_tokens,
+            target_tokens,
+            text_emb,
+            entropy_weight=0.1,
+            usage_entropy_weight=0.1,
+            teacher_forcing_ratio=0.5,
+        )
+
+        assert loss.dim() == 0
+        assert "codebook_entropy_loss" in metrics
+        assert "codebook_usage_entropy_loss" in metrics
+        assert metrics["nar_teacher_forcing_ratio"] == pytest.approx(0.5)
+        assert "nar_conditioning_noise_prob" in metrics
+        assert "pred_usage_entropy" in metrics
+        assert "target_usage_entropy" in metrics
+
+    def test_compute_loss_backward_with_conditioning_updates(self, model):
+        """Loss backward should work with NAR scheduled conditioning enabled."""
+        ar_tokens = torch.randint(0, 1024, (2, 50))
+        target_tokens = torch.randint(0, 1024, (2, 7, 50))
+        text_emb = torch.randn(2, 30, 256)
+
+        loss, _ = model.compute_loss(
+            ar_tokens,
+            target_tokens,
+            text_emb,
+            teacher_forcing_ratio=0.5,
+            conditioning_noise_prob=0.1,
+        )
+        loss.backward()
+
+        has_grad = any(p.grad is not None for p in model.parameters())
+        assert has_grad

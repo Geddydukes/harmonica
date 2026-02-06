@@ -27,6 +27,11 @@ model:
     n_layers: 8
     d_ff: 2048
     dropout: 0.1
+    max_seq_len: 2048
+    text_vocab_size: 128
+    max_text_len: 512
+    text_padding_idx: 0
+    n_text_layers: 4
 
   # Speaker Encoder
   speaker:
@@ -68,7 +73,13 @@ training:
   teacher_forcing_schedule: "linear"  # linear, exponential, constant
   teacher_forcing_start: 1.0
   teacher_forcing_end: 0.3
+  nar_scheduled_sampling: false
+  nar_teacher_forcing_schedule: "linear"
+  nar_teacher_forcing_start: 1.0
+  nar_teacher_forcing_end: 0.5
+  nar_conditioning_noise_prob: 0.0
   duration_loss_weight: 0.1
+  codebook_usage_entropy_weight: 0.0
 
 # Inference configuration
 inference:

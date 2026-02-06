@@ -5,7 +5,8 @@ import pytest
 
 from harmonica.utils.audio import AudioPreprocessor
 from harmonica.training.checkpoint import save_checkpoint, load_checkpoint
-from harmonica.training.trainer import Trainer
+from harmonica.training.trainer import Trainer, NARTrainer
+from harmonica.model import NARTransformer
 
 
 class DummyDataset(torch.utils.data.Dataset):
@@ -35,6 +36,20 @@ class DummyBatchDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, _idx):
         return DummyBatch()
+
+
+class DummyNARBatch:
+    def __init__(self):
+        # [B, K_total, L] where K_total = 1 (AR) + 2 (NAR targets)
+        self.codec_tokens = torch.randint(0, 16, (1, 3, 6), dtype=torch.long)
+        self.audio_lengths = torch.tensor([6], dtype=torch.long)
+        self.text_tokens = torch.randint(0, 16, (1, 4), dtype=torch.long)
+        self.text_lengths = torch.tensor([4], dtype=torch.long)
+        self.prompt_tokens = None
+        self.prompt_lengths = None
+
+    def to(self, _device):
+        return self
 
 
 def test_audio_preprocessor_trim_and_normalize():
@@ -436,3 +451,143 @@ def test_logged_loss_not_over_scaled_by_grad_accum(tmp_path):
     summary = trainer.train(resume=False)
 
     assert summary["final_loss"] == pytest.approx(2.0, rel=1e-4)
+
+
+def test_nar_training_step_uses_nar_text_encoder():
+    model = NARTransformer(
+        n_codebooks=2,
+        vocab_size=16,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        d_ff=16,
+        dropout=0.0,
+        max_seq_len=16,
+        text_vocab_size=16,
+        max_text_len=8,
+        n_text_layers=1,
+    )
+    dummy_loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=1)
+    config = {
+        "training": {
+            "max_update_steps": 2,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 10,
+            "checkpoint_every_updates": 10,
+            "mixed_precision": False,
+        },
+        "experiment": {},
+        "device": {"prefer": "cpu"},
+    }
+    trainer = NARTrainer(
+        model=model,
+        config=config,
+        train_loader=dummy_loader,
+        device=torch.device("cpu"),
+    )
+
+    loss, metrics = trainer.nar_training_step(DummyNARBatch())
+
+    assert loss.item() > 0
+    assert "accuracy" in metrics
+    assert trainer._last_pred_tokens is not None
+    assert trainer._last_target_tokens is not None
+
+
+def test_nar_training_step_applies_entropy_and_noise():
+    model = NARTransformer(
+        n_codebooks=2,
+        vocab_size=16,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        d_ff=16,
+        dropout=0.0,
+        max_seq_len=16,
+        text_vocab_size=16,
+        max_text_len=8,
+        n_text_layers=1,
+    )
+    dummy_loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=1)
+    config = {
+        "training": {
+            "max_update_steps": 2,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 10,
+            "checkpoint_every_updates": 10,
+            "mixed_precision": False,
+            "codebook_entropy_weight": 0.2,
+            "codebook_entropy_warmup_updates": 5,
+            "codebook_usage_entropy_weight": 0.1,
+            "codebook_usage_entropy_warmup_updates": 5,
+            "token_noise_prob": 0.1,
+            "token_noise_warmup_updates": 5,
+            "nar_conditioning_noise_prob": 0.2,
+            "nar_conditioning_noise_warmup_updates": 5,
+        },
+        "experiment": {},
+        "device": {"prefer": "cpu"},
+    }
+    trainer = NARTrainer(
+        model=model,
+        config=config,
+        train_loader=dummy_loader,
+        device=torch.device("cpu"),
+    )
+
+    loss, metrics = trainer.nar_training_step(DummyNARBatch())
+
+    assert loss.item() > 0
+    assert "codebook_entropy_loss" in metrics
+    assert "nar_entropy_weight" in metrics
+    assert "nar_token_noise_prob" in metrics
+    assert "codebook_usage_entropy_loss" in metrics
+    assert "nar_usage_entropy_weight" in metrics
+    assert "nar_conditioning_noise_prob" in metrics
+
+
+def test_nar_trainer_passes_scheduled_teacher_forcing_ratio():
+    model = NARTransformer(
+        n_codebooks=2,
+        vocab_size=16,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        d_ff=16,
+        dropout=0.0,
+        max_seq_len=16,
+        text_vocab_size=16,
+        max_text_len=8,
+        n_text_layers=1,
+    )
+    dummy_loader = torch.utils.data.DataLoader(DummyDataset(), batch_size=1)
+    config = {
+        "training": {
+            "max_update_steps": 10,
+            "warmup_update_steps": 0,
+            "log_every_updates": 1,
+            "eval_every_updates": 10,
+            "checkpoint_every_updates": 10,
+            "mixed_precision": False,
+            "nar_scheduled_sampling": True,
+            "nar_teacher_forcing_schedule": "linear",
+            "nar_teacher_forcing_start": 1.0,
+            "nar_teacher_forcing_end": 0.0,
+        },
+        "experiment": {},
+        "device": {"prefer": "cpu"},
+    }
+    trainer = NARTrainer(
+        model=model,
+        config=config,
+        train_loader=dummy_loader,
+        device=torch.device("cpu"),
+    )
+    trainer.optimizer_step = 5
+
+    _, metrics = trainer.nar_training_step(DummyNARBatch())
+
+    assert "nar_teacher_forcing_ratio" in metrics
+    assert metrics["nar_teacher_forcing_ratio"] == pytest.approx(0.5, abs=1e-5)

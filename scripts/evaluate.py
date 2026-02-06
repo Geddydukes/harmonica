@@ -3,11 +3,16 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import List, Dict
 
 import torch
 from tqdm import tqdm
+
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 from harmonica.codec import EnCodecBackend
 from harmonica.text import CharTokenizer
@@ -220,6 +225,8 @@ def main():
         n_layers=ar_config.get("n_layers", 12),
         d_ff=ar_config.get("d_ff", 2048),
         dropout=ar_config.get("dropout", 0.1),
+        max_seq_len=ar_config.get("max_seq_len", 2048),
+        max_text_len=ar_config.get("max_text_len", 512),
         length_control_mode=ar_config.get("length_control_mode", "duration_predictor"),
         duration_hidden_dim=ar_config.get("duration_hidden_dim", 256),
     )
@@ -238,6 +245,14 @@ def main():
             n_heads=nar_config.get("n_heads", 8),
             n_layers=nar_config.get("n_layers", 8),
             d_ff=nar_config.get("d_ff", 2048),
+            dropout=nar_config.get("dropout", 0.1),
+            max_seq_len=nar_config.get("max_seq_len", ar_config.get("max_seq_len", 2048)),
+            text_vocab_size=nar_config.get(
+                "text_vocab_size", ar_config.get("text_vocab_size", tokenizer.vocab_size)
+            ),
+            max_text_len=nar_config.get("max_text_len", ar_config.get("max_text_len", 512)),
+            text_padding_idx=nar_config.get("text_padding_idx", 0),
+            n_text_layers=nar_config.get("n_text_layers", 4),
         )
         load_checkpoint(args.nar_checkpoint, model=nar_model, device=device)
 

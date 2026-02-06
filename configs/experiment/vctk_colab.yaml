@@ -17,13 +17,25 @@ model:
     dropout: 0.1
     max_seq_len: 1024
     max_text_len: 256
+  nar:
+    n_codebooks: 7
+    vocab_size: 1024
+    d_model: 256
+    n_heads: 4
+    n_layers: 8
+    d_ff: 1024
+    dropout: 0.1
+    max_seq_len: 1024
+    text_vocab_size: 128
+    max_text_len: 256
+    n_text_layers: 2
 
 data:
   dataset: "vctk"
   data_dir: "./data/VCTK-Corpus-0.92"
   cache_dir: "./cache/vctk"
   max_audio_len: 5.0
-  min_audio_len: 0.5
+  min_audio_len: 1.0
   num_workers: 2
 
 training:
@@ -31,32 +43,43 @@ training:
   grad_accum_steps: 8
   # Explicit update-step controls (preferred).
   max_update_steps: 8000
-  warmup_update_steps: 200
+  warmup_update_steps: 100
   log_every_updates: 25
   eval_every_updates: 250
   checkpoint_every_updates: 1000
   warn_after_updates: 250
   # Legacy micro-step fields kept for compatibility with older trainer versions.
   max_steps: 64000
-  warmup_steps: 1600
+  warmup_steps: 800
   log_every: 200
   eval_every: 2000
   checkpoint_every: 8000
   warn_after_step: 2000
-  lr: 4.0e-5
+  lr: 6.0e-5
   weight_decay: 0.01
   max_grad_norm: 1.0
   mixed_precision: true
   scheduled_sampling: false
+  nar_scheduled_sampling: true
+  nar_teacher_forcing_schedule: "linear"
+  nar_teacher_forcing_start: 1.0
+  nar_teacher_forcing_end: 0.6
+  nar_conditioning_noise_prob: 0.08
+  nar_conditioning_noise_warmup_updates: 3000
+  nar_conditioning_noise_warmup_steps: 24000
   label_smoothing: 0.05
   # Encourage broader codebook usage early to prevent collapse.
-  codebook_entropy_weight: 0.20
-  codebook_entropy_warmup_updates: 5000
-  codebook_entropy_warmup_steps: 40000
+  codebook_entropy_weight: 0.10
+  codebook_entropy_warmup_updates: 3000
+  codebook_entropy_warmup_steps: 24000
+  # Encourage broad marginal vocab usage over batch/time.
+  codebook_usage_entropy_weight: 0.06
+  codebook_usage_entropy_warmup_updates: 3000
+  codebook_usage_entropy_warmup_steps: 24000
   # Input token noise to avoid early mode collapse.
-  token_noise_prob: 0.15
-  token_noise_warmup_updates: 5000
-  token_noise_warmup_steps: 40000
+  token_noise_prob: 0.08
+  token_noise_warmup_updates: 3000
+  token_noise_warmup_steps: 24000
   scheduler_type: "constant_warmup"
 
 codec:

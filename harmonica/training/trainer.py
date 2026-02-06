@@ -62,9 +62,30 @@ class Trainer:
         self.teacher_forcing_schedule = train_cfg.get("teacher_forcing_schedule", "linear")
         self.teacher_forcing_start = train_cfg.get("teacher_forcing_start", 1.0)
         self.teacher_forcing_end = train_cfg.get("teacher_forcing_end", 0.3)
+        self.nar_scheduled_sampling = train_cfg.get("nar_scheduled_sampling", False)
+        self.nar_teacher_forcing_schedule = train_cfg.get(
+            "nar_teacher_forcing_schedule",
+            self.teacher_forcing_schedule,
+        )
+        self.nar_teacher_forcing_start = train_cfg.get(
+            "nar_teacher_forcing_start",
+            1.0,
+        )
+        self.nar_teacher_forcing_end = train_cfg.get(
+            "nar_teacher_forcing_end",
+            0.5,
+        )
         self.duration_loss_weight = train_cfg.get("duration_loss_weight", 0.0)
         self.codebook_entropy_weight = train_cfg.get("codebook_entropy_weight", 0.0)
+        self.codebook_usage_entropy_weight = train_cfg.get(
+            "codebook_usage_entropy_weight",
+            0.0,
+        )
         self.token_noise_prob = train_cfg.get("token_noise_prob", 0.0)
+        self.nar_conditioning_noise_prob = train_cfg.get(
+            "nar_conditioning_noise_prob",
+            0.0,
+        )
 
         # Step semantics: schedules and intervals are tracked in optimizer-update units.
         self.max_update_steps = self._resolve_update_steps(
@@ -103,6 +124,20 @@ class Trainer:
             default_legacy=0,
             allow_zero=True,
         )
+        self.nar_conditioning_noise_warmup_updates = self._resolve_update_steps(
+            train_cfg,
+            "nar_conditioning_noise_warmup_updates",
+            "nar_conditioning_noise_warmup_steps",
+            default_legacy=0,
+            allow_zero=True,
+        )
+        self.codebook_usage_entropy_warmup_updates = self._resolve_update_steps(
+            train_cfg,
+            "codebook_usage_entropy_warmup_updates",
+            "codebook_usage_entropy_warmup_steps",
+            default_legacy=0,
+            allow_zero=True,
+        )
 
         # Create optimizer and scheduler
         self.optimizer = create_optimizer(
@@ -137,6 +172,7 @@ class Trainer:
         self.global_step = 0  # legacy alias for micro_step
         self.best_val_loss = float("inf")
         self._last_pred_tokens = None
+        self._last_target_tokens = None
         self._last_audio_lengths = None
 
         # Optional failure detection for eval pipelines
@@ -294,6 +330,7 @@ class Trainer:
                     if self._last_pred_tokens is not None:
                         self.metrics.log_codebook_utilization(
                             self._last_pred_tokens,
+                            target_tokens=self._last_target_tokens,
                             vocab_size=self.model.vocab_size if hasattr(self.model, "vocab_size") else 1024,
                             step=log_step,
                             prefix="train",
@@ -337,6 +374,13 @@ class Trainer:
                     # Check for best model
                     if val_metrics.get("loss", float("inf")) < self.best_val_loss:
                         self.best_val_loss = val_metrics["loss"]
+                        self.metrics.is_best("val_loss", val_metrics["loss"], higher_is_better=False)
+                        if "perplexity" in val_metrics:
+                            self.metrics.is_best(
+                                "val_perplexity",
+                                val_metrics["perplexity"],
+                                higher_is_better=False,
+                            )
                         self._save_checkpoint("checkpoint_best.pt")
 
                 # Checkpointing
@@ -410,20 +454,36 @@ class Trainer:
         """Compute teacher forcing ratio for current step."""
         if not self.use_scheduled_sampling:
             return 1.0
+        return self._compute_scheduled_ratio(
+            step=step,
+            max_steps=max_steps,
+            schedule=self.teacher_forcing_schedule,
+            start=self.teacher_forcing_start,
+            end=self.teacher_forcing_end,
+        )
 
-        progress = min(step / max_steps, 1.0)
+    def _compute_scheduled_ratio(
+        self,
+        step: int,
+        max_steps: int,
+        schedule: str,
+        start: float,
+        end: float,
+    ) -> float:
+        """Compute a generic scheduled ratio with linear or exponential decay."""
+        progress = min(step / max(max_steps, 1), 1.0)
 
-        if self.teacher_forcing_schedule == "linear":
-            ratio = self.teacher_forcing_start - progress * (
-                self.teacher_forcing_start - self.teacher_forcing_end
-            )
-        elif self.teacher_forcing_schedule == "exponential":
-            decay_rate = -np.log(self.teacher_forcing_end / self.teacher_forcing_start)
-            ratio = self.teacher_forcing_start * np.exp(-decay_rate * progress)
+        if schedule == "linear":
+            ratio = start - progress * (start - end)
+        elif schedule == "exponential":
+            safe_start = max(start, 1e-8)
+            safe_end = max(end, 1e-8)
+            decay_rate = -np.log(safe_end / safe_start)
+            ratio = safe_start * np.exp(-decay_rate * progress)
         else:
-            ratio = self.teacher_forcing_start
+            ratio = start
 
-        return float(ratio)
+        return float(np.clip(ratio, 0.0, 1.0))
 
     def _ar_teacher_forcing_step(
         self,
@@ -492,6 +552,7 @@ class Trainer:
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
             self._last_pred_tokens = preds.detach()
+            self._last_target_tokens = audio_tokens.detach()
             self._last_audio_lengths = audio_lengths.detach() if audio_lengths is not None else None
             accuracy = (preds == audio_tokens).float().mean()
             perplexity = torch.exp(loss.detach())
@@ -632,6 +693,8 @@ class Trainer:
         with torch.no_grad():
             preds = all_logits.argmax(dim=-1)
             self._last_pred_tokens = preds.detach()
+            self._last_target_tokens = all_targets.detach()
+            self._last_audio_lengths = audio_lengths.detach() if audio_lengths is not None else None
             accuracy = (preds == all_targets).float().mean()
             perplexity = torch.exp(loss.detach())
 
@@ -680,6 +743,28 @@ class Trainer:
         # Linear decay to 0 over warmup window
         remaining = 1.0 - (step / float(self.codebook_entropy_warmup_updates))
         return float(self.codebook_entropy_weight * max(0.0, remaining))
+
+    def _codebook_usage_entropy_weight_for_step(self, step: int) -> float:
+        """Ramp usage-entropy regularization down after warmup."""
+        if self.codebook_usage_entropy_weight <= 0:
+            return 0.0
+        if self.codebook_usage_entropy_warmup_updates <= 0:
+            return float(self.codebook_usage_entropy_weight)
+        if step >= self.codebook_usage_entropy_warmup_updates:
+            return 0.0
+        remaining = 1.0 - (step / float(self.codebook_usage_entropy_warmup_updates))
+        return float(self.codebook_usage_entropy_weight * max(0.0, remaining))
+
+    def _nar_conditioning_noise_prob_for_step(self, step: int) -> float:
+        """Ramp NAR conditioning-noise down after warmup."""
+        if self.nar_conditioning_noise_prob <= 0:
+            return 0.0
+        if self.nar_conditioning_noise_warmup_updates <= 0:
+            return float(self.nar_conditioning_noise_prob)
+        if step >= self.nar_conditioning_noise_warmup_updates:
+            return 0.0
+        remaining = 1.0 - (step / float(self.nar_conditioning_noise_warmup_updates))
+        return float(self.nar_conditioning_noise_prob * max(0.0, remaining))
 
     @torch.no_grad()
     def evaluate(self) -> Dict[str, float]:
@@ -766,18 +851,60 @@ class NARTrainer(Trainer):
         # CRITICAL: use ground-truth codebook 1 during training
         ar_tokens = batch.codec_tokens[:, 0, :]  # [B, L]
         target_tokens = batch.codec_tokens[:, 1:, :]  # [B, K, L]
+        noisy_ar_tokens = self._maybe_apply_token_noise(ar_tokens, batch.audio_lengths)
 
-        text_emb, text_mask = self.model.text_encoder(
+        text_emb, text_mask = self.model.encode_text(
             batch.text_tokens, batch.text_lengths
         )
 
+        entropy_weight = self._codebook_entropy_weight_for_step(self.optimizer_step)
+        usage_entropy_weight = self._codebook_usage_entropy_weight_for_step(
+            self.optimizer_step
+        )
+        if self.nar_scheduled_sampling:
+            nar_tf_ratio = self._compute_scheduled_ratio(
+                step=self.optimizer_step,
+                max_steps=self.max_update_steps,
+                schedule=self.nar_teacher_forcing_schedule,
+                start=self.nar_teacher_forcing_start,
+                end=self.nar_teacher_forcing_end,
+            )
+        else:
+            nar_tf_ratio = 1.0
+        nar_conditioning_noise = self._nar_conditioning_noise_prob_for_step(
+            self.optimizer_step
+        )
         loss, metrics = self.model.compute_loss(
-            ar_tokens=ar_tokens,
+            ar_tokens=noisy_ar_tokens,
             target_tokens=target_tokens,
             text_emb=text_emb,
             text_mask=text_mask,
             audio_lengths=batch.audio_lengths,
             label_smoothing=self.label_smoothing,
+            entropy_weight=entropy_weight,
+            usage_entropy_weight=usage_entropy_weight,
+            teacher_forcing_ratio=nar_tf_ratio,
+            conditioning_noise_prob=nar_conditioning_noise,
         )
+
+        # Keep diagnostics hooks active for NAR runs.
+        self._last_pred_tokens = getattr(self.model, "_last_pred_tokens", None)
+        self._last_target_tokens = getattr(self.model, "_last_target_tokens", None)
+        self._last_audio_lengths = (
+            batch.audio_lengths.detach()
+            if batch.audio_lengths is not None
+            else None
+        )
+        if entropy_weight > 0:
+            metrics["nar_entropy_weight"] = float(entropy_weight)
+        if usage_entropy_weight > 0:
+            metrics["nar_usage_entropy_weight"] = float(usage_entropy_weight)
+        noise_prob = self._token_noise_prob_for_step(self.optimizer_step)
+        if noise_prob > 0:
+            metrics["nar_token_noise_prob"] = float(noise_prob)
+        if self.nar_scheduled_sampling:
+            metrics["nar_teacher_forcing_ratio"] = float(nar_tf_ratio)
+        if nar_conditioning_noise > 0:
+            metrics["nar_conditioning_noise_prob"] = float(nar_conditioning_noise)
 
         return loss, metrics
